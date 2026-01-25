@@ -5,18 +5,6 @@
 using ValueType = float;
 using IndexType = int;
 
-
-template <unsigned int WARP_SIZE>
-__device__ __forceinline__ ValueType warp_reduce_sum(ValueType sum) {
-    unsigned int mask = 0xffffffff;
-    if (WARP_SIZE >= 32) sum += __shfl_xor_sync(mask, sum, 16);
-    if (WARP_SIZE >= 16) sum += __shfl_xor_sync(mask, sum, 8);
-    if (WARP_SIZE >= 8) sum += __shfl_xor_sync(mask, sum, 4);
-    if (WARP_SIZE >= 4) sum += __shfl_xor_sync(mask, sum, 2);
-    if (WARP_SIZE >= 2) sum += __shfl_xor_sync(mask, sum, 1);
-    return sum;
-}
-
 template<const IndexType Br, const IndexType Bc, const IndexType d, const IndexType blockSize, const IndexType warpSize>
 __global__ void flash_attention_v2_naive(
     const ValueType* __restrict__ Q,
