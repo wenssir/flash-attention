@@ -3,29 +3,13 @@
 #include <cuda_runtime.h>
 #include <cuda/pipeline>
 
+#include "../loadstore/load_func.cuh"
+#include "../loadstore/store_func.cuh"
+
+
 using ValueType = float;
 using IndexType = int;
 
-
-__device__ __forceinline__ float4 load_float4_safe(float* __restrict__ ptr, IndexType width, IndexType cur) {
-    if (cur + 4 < width) {
-        return *reinterpret_cast<float4*>(ptr + cur); 
-    }
-
-    float4 res = {0.0, 0.0, 0.0, 0.0};
-
-    if (cur < width) res.x = ptr[cur];
-    if (cur + 1 < width) res.y = ptr[cur + 1];
-    if (cur + 2 < width) res.z = ptr[cur + 2];
-    if (cur + 3 < width) res.w = ptr[cur + 3];
-
-    return res;
-}
-
-
-__device__ __forceinline__ float4 load_float4(const float* __restrict__ ptr, IndexType cur) {
-    return *reinterpret_cast<const float4*>(ptr + cur);
-}
 
 template<const IndexType Br, const IndexType Bc, const IndexType d, const IndexType blockSize, const IndexType warpSize>
 __global__ void flash_attention_forward_v2_tile_and_prefetch(
@@ -44,8 +28,6 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
     // IndexType bid = blockIdx.z;
     // IndexType hid = blockIdx.y;
     // IndexType tid = blockIdx.x; // tile ID
-
-    const int d4 = d >> 2;
 
     constexpr int thread_per_row = (d == 64) ? 8 : (d == 128 ? 16 : 32);
     constexpr int rows_per_warp = warpSize / thread_per_row;
@@ -91,23 +73,9 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
     }
 
     int stage = 0;
-    const int total_q_elems = Br * d4;
-    #pragma unroll
-    for (int idx = threadIdx.x; idx < total_q_elems; idx += blockSize) {
-        int row = idx / d4;
-        int col = idx % d4;
-        reinterpret_cast<float4*>(&qmem)[idx] = load_float4(q_ptr, row * q_stride_n + col * 4);
-    }
-
-    // prefetch first k/v shared memory tile
-    const int total_kv_elems = Bc * d4;
-    #pragma unroll
-    for (int idx = threadIdx.x; idx < total_kv_elems; idx += blockSize) {
-        int row = idx / d4;
-        int col = idx % d4;
-        reinterpret_cast<float4*>(&kmem[0])[idx] = load_float4(k_ptr, row * k_stride_n + col * 4);
-        reinterpret_cast<float4*>(&vmem[0])[idx] = load_float4(v_ptr, row * v_stride_n + col * 4);
-    }
+    load_tile_sync<float, blockSize, Br, d>(q_ptr, qmem, q_stride_n);
+    load_tile_sync<float, blockSize, Bc, d>(k_ptr, kmem[0], k_stride_n);
+    load_tile_sync<float, blockSize, Bc, d>(v_ptr, vmem[0], v_stride_n);
     __syncthreads();
 
     for (int j = 0; j < N; j += Bc) {
@@ -116,13 +84,8 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
             const float* k_next_ptr = k_ptr + (j + Bc) * k_stride_n;
             const float* v_next_ptr = v_ptr + (j + Bc) * v_stride_n;
             int write_stage = (stage + 1) % 2;
-            #pragma unroll
-            for (int idx = threadIdx.x; idx < total_kv_elems; idx += blockSize) {
-                int row = idx / d4;
-                int col = idx % d4;
-                reinterpret_cast<float4*>(&kmem[write_stage])[idx] = load_float4(k_next_ptr, row * k_stride_n + col * 4);
-                reinterpret_cast<float4*>(&vmem[write_stage])[idx] = load_float4(v_next_ptr, row * v_stride_n + col * 4);
-            }
+            load_tile_sync<float, blockSize, Bc, d>(k_next_ptr, kmem[write_stage], k_stride_n);
+            load_tile_sync<float, blockSize, Bc, d>(v_next_ptr, vmem[write_stage], v_stride_n);
             __syncthreads();
         }
 
@@ -183,7 +146,6 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
                             acc_o[local_row_idx][index + 3] = acc_o[local_row_idx][index + 3] * alpha + p_val * vreg[index % 8 + 3];
                         }
                     }
-
                 }
             }
             local_row_idx++;
@@ -193,29 +155,8 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
         stage = (stage + 1) % 2;
     }
 
-
-    int local_row_idx = 0;
     ValueType* o_row_ptr = O + o_stride_b * blockIdx.z + o_stride_h * blockIdx.y + (blockIdx.x * Br * q_stride_n);
-    #pragma unroll
-    for (int current_row = row_id_in_warp + warp_start_row; current_row < Br; current_row += block_row_count) {
-        if (current_row < Br) {
-            float inv_l = 1.0f / l[local_row_idx];
-            #pragma unroll
-            for (int j = 0; j < elem_num_per_thread_in_row; j += 4) {
-                const int offset = thread_start_in_row + j;
-                if (offset < d) {
-                    float4 res;
-                    res.x = acc_o[local_row_idx][j] * inv_l;
-                    res.y = acc_o[local_row_idx][j + 1] * inv_l;
-                    res.z = acc_o[local_row_idx][j + 2] * inv_l;
-                    res.w = acc_o[local_row_idx][j + 3] * inv_l;
-                    
-                    *reinterpret_cast<float4*>(&((o_row_ptr + current_row * q_stride_n)[offset])) = res;
-                }
-            }
-        }
-        local_row_idx++;
-    }
+    ldst::save_acc_o_to_gm<float, Br, d>(reinterpret_cast<float*>(acc_o), o_row_ptr, l, q_stride_n, row_id_in_warp, warp_start_row, thread_start_in_row, elem_num_per_thread_in_row, block_row_count);
 }
 
 
