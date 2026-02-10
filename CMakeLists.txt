@@ -9,8 +9,10 @@ project(FlashAttentionV2
 # Build Type
 # ============================================================
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ============================================================
 # Options
@@ -54,6 +56,17 @@ set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 # ============================================================
 find_package(CUDAToolkit REQUIRED)
 
+# Fetch GoogleTest (gtest) for unit testing
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.14.0
+)
+# For Windows: Prevent overriding parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
 # ============================================================
 # Include Directories
 # ============================================================
@@ -70,17 +83,50 @@ set(FA_HEADERS
     # Config
     src/config/config.cuh
 
-    # Utils
-    src/utils/util_func.cuh
+    # Container
+    src/container/tuple.cuh
+
+    # Numeric
+    src/numeric/Int.cuh
+    src/numeric/real.h
+
+    # Layout
+    src/layout/stride.cuh
+    src/layout/shape.h
+    src/layout/coordinate.h
+    src/layout/offset.cuh
+    src/layout/layout.h
+    src/layout/composedLayout.h
+
+    # PTX
+    src/ptx/ptx.cuh
+    src/ptx/copy.cuh
+    src/ptx/mma_atom.cuh
+
+    # Tensor Core
+    src/tensor_core/fragment.cuh
+    src/tensor_core/accum_layout_traits.cuh
+    src/tensor_core/swizzle.cuh
+    src/tensor_core/tensor.cuh
+
+    # Softmax
+    src/softmax/online_softmax.cuh
 
     # Load/Store
     src/loadstore/load_func.cuh
     src/loadstore/store_func.cuh
-    src/loadstore/ptx_func.cuh
+    src/loadstore/copy_gsm.cuh
+    src/loadstore/copy_srm.cuh
+    src/loadstore/ldmatrix_coord.cuh
+
+    # Utils
+    src/utils/util_func.cuh
+    src/utils/print.h
 
     # Forward
     src/forward/forward_v1_naive.h
     src/forward/forward_v2_float4_double_buffer_prefetch.h
+    src/forward/forward_v3_tensor_core.cuh
 )
 
 # ============================================================
@@ -101,6 +147,7 @@ add_library(fa::fa ALIAS FlashAttentionV2)
 # ============================================================
 if(FA_BUILD_TESTS)
     message(STATUS "Building tests: ON")
+    include(GoogleTest)
 
     # test_flash_attention
     add_executable(test_flash_attention tests/test_flash_attention.cu)
@@ -114,6 +161,138 @@ if(FA_BUILD_TESTS)
     target_link_libraries(profile_kernel PRIVATE fa::fa)
     set_target_properties(profile_kernel PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+    )
+
+    # test_shape (gtest unit tests)
+    add_executable(test_shape tests/layout/test_shape.cpp)
+    target_link_libraries(test_shape PRIVATE gtest_main)
+    gtest_discover_tests(test_shape)
+
+    # test_layout (gtest unit tests)
+    add_executable(test_layout tests/layout/test_layout.cpp)
+    target_link_libraries(test_layout PRIVATE gtest_main)
+    gtest_discover_tests(test_layout)
+
+    # test_divide (gtest unit tests)
+    add_executable(test_divide tests/layout/test_divide.cpp)
+    target_link_libraries(test_divide PRIVATE gtest_main)
+    gtest_discover_tests(test_divide)
+
+    # test_ComposedLayout (gtest unit tests)
+    add_executable(test_ComposedLayout tests/layout/test_ComposedLayout.cpp)
+    target_link_libraries(test_ComposedLayout PRIVATE gtest_main)
+    gtest_discover_tests(test_ComposedLayout)
+
+    # test_tuple (gtest unit tests)
+    add_executable(test_tuple tests/container/test_tuple.cpp)
+    target_link_libraries(test_tuple PRIVATE gtest_main)
+    gtest_discover_tests(test_tuple)
+
+    # test_fragment_layout (gtest unit tests)
+    add_executable(test_fragment_layout tests/test_fragment_layout.cu)
+    target_link_libraries(test_fragment_layout PRIVATE fa::fa gtest_main)
+    set_target_properties(test_fragment_layout PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_fragment_layout)
+
+    # test_mma_fragment (standalone CUDA smoke test)
+    add_executable(test_mma_fragment tests/ptx/test_mma_fragment.cu)
+    target_link_libraries(test_mma_fragment PRIVATE fa::fa)
+    set_target_properties(test_mma_fragment PROPERTIES
+        CUDA_ARCHITECTURES "80;86;89;90"
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    add_test(NAME test_mma_fragment COMMAND test_mma_fragment)
+
+    # test_forward_v3_correctness (standalone CUDA correctness test)
+    add_executable(test_forward_v3_correctness tests/test_forward_v3_correctness.cu)
+    target_link_libraries(test_forward_v3_correctness PRIVATE fa::fa)
+    set_target_properties(test_forward_v3_correctness PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    add_test(NAME test_forward_v3_correctness COMMAND test_forward_v3_correctness)
+
+    # test_copy_gsm (gtest unit tests)
+    add_executable(test_copy_gsm tests/loadstore/test_copy_gsm.cu)
+    target_link_libraries(test_copy_gsm PRIVATE fa::fa gtest_main)
+    set_target_properties(test_copy_gsm PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_copy_gsm)
+
+    # test_copy_gsm_v3_bounds (gtest unit tests)
+    add_executable(test_copy_gsm_v3_bounds tests/loadstore/test_copy_gsm_v3_bounds.cu)
+    target_link_libraries(test_copy_gsm_v3_bounds PRIVATE fa::fa gtest_main)
+    set_target_properties(test_copy_gsm_v3_bounds PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_copy_gsm_v3_bounds)
+
+    # test_copy_gsm_tile_shapes (gtest unit tests)
+    add_executable(test_copy_gsm_tile_shapes tests/loadstore/test_copy_gsm_tile_shapes.cu)
+    target_link_libraries(test_copy_gsm_tile_shapes PRIVATE fa::fa gtest_main)
+    set_target_properties(test_copy_gsm_tile_shapes PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_copy_gsm_tile_shapes)
+
+    # test_thread_slice (gtest unit tests)
+    add_executable(test_thread_slice tests/loadstore/test_thread_slice.cu)
+    target_link_libraries(test_thread_slice PRIVATE fa::fa gtest_main)
+    set_target_properties(test_thread_slice PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_thread_slice)
+
+    # test_tensor (gtest unit tests)
+    add_executable(test_tensor tests/tensor/test_tensor.cu)
+    target_link_libraries(test_tensor PRIVATE fa::fa gtest_main)
+    set_target_properties(test_tensor PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_tensor)
+
+    # test_copy_srm (gtest unit tests)
+    add_executable(test_copy_srm tests/loadstore/test_copy_srm.cu)
+    target_link_libraries(test_copy_srm PRIVATE fa::fa gtest_main)
+    set_target_properties(test_copy_srm PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_copy_srm)
+
+    # test_copy_atom (gtest unit tests)
+    add_executable(test_copy_atom tests/loadstore/test_copy_atom.cu)
+    target_link_libraries(test_copy_atom PRIVATE fa::fa gtest_main)
+    set_target_properties(test_copy_atom PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    gtest_discover_tests(test_copy_atom)
+
+    # Direct run targets for v3 debug/correctness tests
+    add_custom_target(run_test_copy_gsm_v3_bounds
+        COMMAND $<TARGET_FILE:test_copy_gsm_v3_bounds>
+        DEPENDS test_copy_gsm_v3_bounds
+        USES_TERMINAL
+    )
+
+    add_custom_target(run_test_copy_gsm_tile_shapes
+        COMMAND $<TARGET_FILE:test_copy_gsm_tile_shapes>
+        DEPENDS test_copy_gsm_tile_shapes
+        USES_TERMINAL
+    )
+
+    add_custom_target(run_test_forward_v3_correctness
+        COMMAND $<TARGET_FILE:test_forward_v3_correctness>
+        DEPENDS test_forward_v3_correctness
+        USES_TERMINAL
+    )
+
+    add_custom_target(run_test_forward_v3_all
+        DEPENDS
+            run_test_copy_gsm_v3_bounds
+            run_test_copy_gsm_tile_shapes
+            run_test_forward_v3_correctness
     )
 else()
     message(STATUS "Building tests: OFF")
@@ -138,9 +317,11 @@ endif()
 if(FA_BUILD_EXAMPLES)
     message(STATUS "Building examples: ON")
 
-    # vector_add (basic CUDA example)
-    add_executable(vector_add vector_add.cu)
-    target_link_libraries(vector_add PRIVATE CUDA::cudart)
+    # vector_add (basic CUDA example) - only if file exists
+    if(EXISTS "${PROJECT_SOURCE_DIR}/vector_add.cu")
+        add_executable(vector_add vector_add.cu)
+        target_link_libraries(vector_add PRIVATE CUDA::cudart)
+    endif()
 else()
     message(STATUS "Building examples: OFF")
 endif()
