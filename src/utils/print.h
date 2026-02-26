@@ -19,6 +19,9 @@ HOST_DEVICE void print(const char* s) {
     printf("%s", s);
 }
 
+template <typename... Ts>
+HOST_DEVICE void print(cxx::tuple<Ts...> const& t);
+
 template <typename Tuple, size_t... Is>
 HOST_DEVICE void print_tuple_impl(Tuple const& t, cxx::index_sequence<Is...>) {
     printf("(");

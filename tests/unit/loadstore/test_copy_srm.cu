@@ -4,7 +4,7 @@
 #include <cstdio>
 
 #include "tensor_core/fragment.cuh"
-#include "loadstore/ldmatrix_coord.cuh"
+#include "loadstore/copy_srm.cuh"
 #include "layout/layout.h"
 #include "tensor_core/tensor.cuh"
 #include "numeric/Int.cuh"

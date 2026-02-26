@@ -4,8 +4,8 @@
 #include <cmath>
 #include <cstdlib>
 
-#include "../../src/ptx/ptx.cuh"
-#include "../../src/tensor_core/fragment.cuh"
+#include "src/ptx/ptx.cuh"
+#include "src/tensor_core/fragment.cuh"
 
 #define CUDA_CHECK(call) \
     do { \

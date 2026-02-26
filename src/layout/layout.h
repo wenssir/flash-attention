@@ -78,8 +78,8 @@ HOST_DEVICE constexpr auto logical_divide(Layout const& layout, Tile const& t) {
             );
 
             return make_layout(
-                make_shape(cxx::get<Is>(sub_res).shape...),
-                make_stride(cxx::get<Is>(sub_res).stride...)
+                make_shape(cxx::get<Is>(sub_res).shape()...),
+                make_stride(cxx::get<Is>(sub_res).stride()...)
             );
         }(cxx::make_index_sequence<cxx::tuple_size_v<decltype(shape)>>{});
     }

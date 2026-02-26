@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "../../src/layout/shape.h"
-#include "../../src/numeric/Int.cuh"
+#include "../../../src/layout/shape.h"
+#include "../../../src/numeric/Int.cuh"
 
 using namespace layout;
 using namespace numeric;

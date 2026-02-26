@@ -6,6 +6,7 @@
 #include "../src/layout/offset.cuh"
 #include "../src/tensor_core/fragment.cuh"
 #include "../src/tensor_core/swizzle.cuh"
+#include "../src/tensor_core/tensor.cuh"
 #include "../src/numeric/Int.cuh"
 
 using namespace layout;
@@ -18,12 +19,12 @@ using namespace tensor;
 
 TEST(FragmentLayoutTest, Fragment16x16_Constants) {
     // 验证编译时常量
-    using Frag16x16 = Fragment<__half, 16, 16, Layout<int, int>>;
+    using Frag16x16 = Fragment<__half, loadstore::LdmatrixHelperQ<__half>, 16, 16>;
     EXPECT_EQ(Frag16x16::REGS_PER_LANE, 4);
 }
 
 TEST(FragmentLayoutTest, Fragment16x8_Constants) {
-    using Frag16x8 = Fragment<__half, 16, 8, Layout<int, int>>;
+    using Frag16x8 = Fragment<__half, loadstore::LdmatrixHelperK<__half>, 16, 8>;
     EXPECT_EQ(Frag16x8::REGS_PER_LANE, 2);
 }
 
@@ -34,14 +35,17 @@ TEST(FragmentLayoutTest, Fragment16x8_Constants) {
 __global__ void fragment_test_kernel(__half* smem, uint32_t* output) {
     int lane_id = threadIdx.x % 32;
 
-    // 在 kernel 内直接构造简单的 Layout（不调用 make_layout）
-    Layout<int, int> layout(32, 1);  // shape=32, stride=1
+    auto smem_layout = make_layout(
+        make_shape(Int<16>{}, Int<16>{}),
+        make_stride(Int<16>{}, Int<1>{})
+    );
+    auto smem_tensor = make_tensor(smem, smem_layout);
 
     // 创建 Fragment
-    Fragment<__half, 16, 16, Layout<int, int>> frag(layout);
+    Fragment<__half, loadstore::LdmatrixHelperQ<__half>, 16, 16> frag;
 
     // 加载
-    frag.load(smem, lane_id);
+    frag.load(smem_tensor, lane_id);
 
     // 输出结果
     int base_idx = threadIdx.x * 4;

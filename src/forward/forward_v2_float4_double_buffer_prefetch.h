@@ -31,6 +31,7 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
 
     constexpr int thread_per_row = (d == 64) ? 8 : (d == 128 ? 16 : 32);
     constexpr int rows_per_warp = warpSize / thread_per_row;
+    const float softmax_scale = rsqrtf(static_cast<float>(d));
 
     const float* q_ptr = Q + q_stride_b * blockIdx.z + q_stride_h * blockIdx.y + Br * q_stride_n * blockIdx.x;
     const float* k_ptr = K + k_stride_b * blockIdx.z + k_stride_h * blockIdx.y;
@@ -118,6 +119,7 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
                     for (int t = thread_per_row >> 1; t >= 1; t = t >> 1) {
                         Sij += __shfl_xor_sync(0xffffffff, Sij, t);
                     }
+                    Sij *= softmax_scale;
 
                     ValueType m_prev = m[local_row_idx];
                     ValueType l_prev = l[local_row_idx];
@@ -156,7 +158,26 @@ __global__ void flash_attention_forward_v2_tile_and_prefetch(
     }
 
     ValueType* o_row_ptr = O + o_stride_b * blockIdx.z + o_stride_h * blockIdx.y + (blockIdx.x * Br * q_stride_n);
-    ldst::save_acc_o_to_gm<float, Br, d>(reinterpret_cast<float*>(acc_o), o_row_ptr, l, q_stride_n, row_id_in_warp, warp_start_row, thread_start_in_row, elem_num_per_thread_in_row, block_row_count);
-}
+    int local_row_idx = 0;
+    #pragma unroll
+    for (int current_row = row_id_in_warp + warp_start_row; current_row < Br; current_row += block_row_count) {
+        if (current_row < Br) {
+            float inv_l = 1.0f / l[local_row_idx];
+            #pragma unroll
+            for (int j = 0; j < elem_num_per_thread_in_row; j += 4) {
+                const int offset = thread_start_in_row + j;
+                if (offset < d) {
+                    float4 res;
+                    res.x = acc_o[local_row_idx][j] * inv_l;
+                    res.y = acc_o[local_row_idx][j + 1] * inv_l;
+                    res.z = acc_o[local_row_idx][j + 2] * inv_l;
+                    res.w = acc_o[local_row_idx][j + 3] * inv_l;
 
+                    *reinterpret_cast<float4*>(&((o_row_ptr + current_row * q_stride_n)[offset])) = res;
+                }
+            }
+        }
+        local_row_idx++;
+    }
+}
 

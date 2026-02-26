@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 
-#include "../../src/layout/layout.h"
-#include "../../src/layout/composedLayout.h"
-#include "../../src/layout/offset.cuh"
-#include "../../src/layout/shape.h"
-#include "../../src/layout/coordinate.h"
-#include "../../src/numeric/Int.cuh"
+#include "../../../src/layout/layout.h"
+#include "../../../src/layout/composedLayout.h"
+#include "../../../src/layout/offset.cuh"
+#include "../../../src/layout/shape.h"
+#include "../../../src/layout/coordinate.h"
+#include "../../../src/numeric/Int.cuh"
 
 using namespace layout;
 using namespace numeric;
@@ -25,7 +25,7 @@ TEST(ComposedLayoutTest, Identity_Composition) {
     // Zero offset: coordinate (0, 0) with outer's stride
     auto off = make_offset(
         make_shape(Int<0>{}, Int<0>{}),     // 零偏移坐标
-        outer.stride                        // 使用 outer 的 stride
+        outer.stride()                      // 使用 outer 的 stride
     );
 
     ComposedLayout composed(outer, off, inner);

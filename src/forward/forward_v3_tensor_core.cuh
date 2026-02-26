@@ -106,6 +106,9 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     }
     softmax::OnlineSoftmaxState<1> sm_state;
 
+    constexpr float kLog2e = 1.4426950408889634f;
+    const float softmax_scale_log2e = args.softmax_scale * kLog2e;
+
     for (int kv_tile = 0; kv_tile < args.seq_len / KernelConfig::BlockN; ++kv_tile) {
         auto gKTile = tensor::local_tile(gK, kv_tile_layout, layout::make_coordinate(kv_tile, 0));
         auto gVTile = tensor::local_tile(gV, kv_tile_layout, layout::make_coordinate(kv_tile, 0));
@@ -131,14 +134,13 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
                     score += qv * kv;
                 }
 
-                score *= args.softmax_scale;
                 if (args.causal && global_col > global_row) {
                     score = -INFINITY;
                 }
 
                 float score_frag[1][1] = {{score}};
                 softmax::online_softmax_step<1, 1>(
-                    score_frag, sm_state, 1.0f, (kv_tile == 0 && j == 0),
+                    score_frag, sm_state, softmax_scale_log2e, (kv_tile == 0 && j == 0),
                     [&](int, float alpha) {
                         #pragma unroll
                         for (int d = 0; d < KernelConfig::HeadDim; ++d) {

@@ -1,0 +1,56 @@
+# Remote profile config for scripts/auto_profile.sh
+# Usage:
+#   ./scripts/auto_profile.sh remote --config scripts/remote_config.example
+
+# Remote target (optional if passed as CLI positional user@host)
+REMOTE_ADDR="ubuntu@69.19.136.162"
+REMOTE_PORT="22"
+REMOTE_PATH="/tmp/flash_attention_v2_profile"
+REMOTE_ARCH="80"  # 80 for A100/A30/A40, 90 for H100
+SSH_KEY_PATH="$HOME/.ssh/id_rsa"
+
+# What to run: all | ours | official | pytorch
+# all      => run ours + official + pytorch
+# ours     => run only profile_kernel (plus NCU if enabled)
+# official => run only official flash-attn benchmark
+# pytorch  => run only pytorch benchmark (via benchmark_official_flashattn.py --kernels pytorch)
+RUN_TARGET="ours"
+
+# Optional one-line shape for all three paths:
+# PROFILE_SHAPE="BxHxNxD"
+# If set, it overrides:
+#   OURS_BENCH_CONFIG, OURS_NCU_CONFIG,
+#   OFFICIAL_BATCH_SIZE, OFFICIAL_N_HEADS, OFFICIAL_SEQ_LENS, OFFICIAL_D_HEADS
+PROFILE_SHAPE="16x16x4096x128"
+
+# Fine-grained toggles (0/1). These are applied before RUN_TARGET.
+RUN_OURS=1
+RUN_OFFICIAL=1
+RUN_PYTORCH=1
+RUN_BENCHMARK=1
+RUN_NCU=1
+STRICT_MODE=0
+
+# Ours (C++ profile_kernel)
+# preset: tiny|small|medium|large|all
+# or custom shape: BxHxNxD, for example 16x16x4096x128
+OURS_BENCH_CONFIG="16x16x4096x128"
+OURS_NCU_CONFIG="16x16x4096x128"
+NCU_SET="full"
+# Optional:
+# NCU_LAUNCH_SKIP="0"
+# NCU_LAUNCH_COUNT="1"
+
+# Official/PyTorch python benchmark shapes
+OFFICIAL_SEQ_LENS="4096"
+OFFICIAL_D_HEADS="128"
+OFFICIAL_BATCH_SIZE="16"
+OFFICIAL_N_HEADS="16"
+OFFICIAL_WARMUPS="10"
+OFFICIAL_REPEATS="50"
+OFFICIAL_DTYPE="fp16"            # fp16|bf16
+OFFICIAL_PYTORCH_DTYPE="match"   # match|fp32
+OFFICIAL_INPUT_MODE="random"     # random|structured|stress|replay
+OFFICIAL_SEED="1234"
+OFFICIAL_REPLAY_DIR="benchmark/data/replay"
+OFFICIAL_REPLAY_FILE=""

@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "../../src/layout/layout.h"
-#include "../../src/layout/shape.h"
-#include "../../src/layout/coordinate.h"
-#include "../../src/numeric/Int.cuh"
+#include "../../../src/layout/layout.h"
+#include "../../../src/layout/shape.h"
+#include "../../../src/layout/coordinate.h"
+#include "../../../src/numeric/Int.cuh"
 
 using namespace layout;
 using namespace numeric;
