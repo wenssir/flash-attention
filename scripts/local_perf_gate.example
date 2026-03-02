@@ -1,0 +1,27 @@
+# Local perf gate config example
+# Usage:
+#   ./scripts/run_local_perf_gate.sh --config scripts/local_perf_gate.example
+
+BUILD_DIR=build
+OUT_DIR=profile_results/gate
+GATE_FILE=profile_results/gate_history.csv
+PREFIX=gate
+
+# Shape
+SEQ_LEN=4096
+D_HEAD=128
+BATCH_SIZE=16
+N_HEADS=16
+
+# Benchmark
+WARMUPS=10
+REPEATS=50
+DTYPE=fp16
+INPUT_MODE=random
+SEED=1234
+
+# Build / profile
+# CUDA_ARCH=80
+RUN_NCU=0
+CLEAN_EXT=1
+NCU_CMD=ncu

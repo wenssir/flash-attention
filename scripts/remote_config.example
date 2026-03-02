@@ -3,7 +3,7 @@
 #   ./scripts/auto_profile.sh remote --config scripts/remote_config.example
 
 # Remote target (optional if passed as CLI positional user@host)
-REMOTE_ADDR="ubuntu@69.19.136.162"
+REMOTE_ADDR="ubuntu@62.169.159.221"
 REMOTE_PORT="22"
 REMOTE_PATH="/tmp/flash_attention_v2_profile"
 REMOTE_ARCH="80"  # 80 for A100/A30/A40, 90 for H100

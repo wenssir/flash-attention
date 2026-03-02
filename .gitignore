@@ -42,21 +42,38 @@ htmlcov/
 *.swp
 *.swo
 *~
+.clangd
+.cache/clangd/
+.cache/clangd/index/
+compile_commands.json
 
 # C++ / CMake
 build/
+build_*/
 cmake-build-*/
 *.o
+*.obj
+*.out
+*.d
 *.a
 *.so
 *.dylib
 *.dll
+*.ptx
+*.cubin
+*.fatbin
+*.nvvm
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake
 !CMakeLists.txt
+_deps/
+**/_deps/
+*googletest*
+*gtest*
+*gmock*
 
 # OS
 .DS_Store
@@ -64,3 +81,18 @@ Thumbs.db
 
 # Logs
 *.log
+
+# NCU Profiling reports
+reports/
+*.ncu-rep
+*.sqlite
+profile_results/**/*.csv
+profile_results/**/*.json
+
+# Markdown (keep README only)
+*.md
+!README.md
+!**/README.md
+
+# Deployment configuration (contains sensitive information)
+scripts/deploy.conf

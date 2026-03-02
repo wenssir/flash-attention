@@ -8,6 +8,7 @@
 #include "../config/config.cuh"
 #include "../layout/layout.h"
 #include "../loadstore/copy_atom.cuh"
+#include "../loadstore/store_func.cuh"
 #include "../softmax/online_softmax.cuh"
 #include "../tensor_core/tensor.cuh"
 
@@ -48,11 +49,14 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     static_assert(KernelConfig::BlockM == constants::V3_BLOCK_M, "v3 baseline expects BlockM=64");
     static_assert(KernelConfig::BlockN == constants::V3_BLOCK_N, "v3 baseline expects BlockN=64");
     static_assert(KernelConfig::NWarps == constants::V3_WARPS, "v3 baseline expects 4 warps");
+    static_assert((KernelConfig::HeadDim % 2) == 0, "v3 split-row path requires even head_dim");
 
     int sample = blockIdx.z;
     int head = blockIdx.y;
     int q_tile = blockIdx.x;
     int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
 
     extern __shared__ char smem_raw[];
     Element* smem_ptr = reinterpret_cast<Element*>(smem_raw);
@@ -96,12 +100,17 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     loadstore::copy_tile<KernelConfig>(sQ, gQTile, loadstore::CopyG2SOp{});
     __syncthreads();
 
-    int local_row = tid;
+    constexpr int kRowsPerWarp = KernelConfig::BlockM / KernelConfig::NWarps;
+    constexpr int kHalfHeadDim = KernelConfig::HeadDim / 2;
+    int row_in_warp = lane >> 1;
+    int half = lane & 1;
+    int col_base = half * kHalfHeadDim;
+    int local_row = warp * kRowsPerWarp + row_in_warp;
     int global_row = q_tile * KernelConfig::BlockM + local_row;
 
-    float acc[KernelConfig::HeadDim];
+    float acc[kHalfHeadDim];
     #pragma unroll
-    for (int d = 0; d < KernelConfig::HeadDim; ++d) {
+    for (int d = 0; d < kHalfHeadDim; ++d) {
         acc[d] = 0.0f;
     }
     softmax::OnlineSoftmaxState<1> sm_state;
@@ -122,37 +131,38 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
                 softmax::online_softmax_init(sm_state);
             }
 
-            #pragma unroll
+            // #pragma unroll
             for (int j = 0; j < KernelConfig::BlockN; ++j) {
                 int global_col = kv_tile * KernelConfig::BlockN + j;
 
-                float score = 0.0f;
+                float partial = 0.0f;
                 #pragma unroll
-                for (int d = 0; d < KernelConfig::HeadDim; ++d) {
-                    float qv = to_float(sQ(local_row, d));
-                    float kv = to_float(sK(j, d));
-                    score += qv * kv;
+                for (int d = 0; d < kHalfHeadDim; ++d) {
+                    float qv = to_float(sQ(local_row, col_base + d));
+                    float kv = to_float(sK(j, col_base + d));
+                    partial += qv * kv;
                 }
+                float score = partial + __shfl_xor_sync(0xffffffffu, partial, 1);
 
                 if (args.causal && global_col > global_row) {
                     score = -INFINITY;
                 }
 
+                bool is_first = (kv_tile == 0 && j == 0);
                 float score_frag[1][1] = {{score}};
-                softmax::online_softmax_step<1, 1>(
-                    score_frag, sm_state, softmax_scale_log2e, (kv_tile == 0 && j == 0),
-                    [&](int, float alpha) {
-                        #pragma unroll
-                        for (int d = 0; d < KernelConfig::HeadDim; ++d) {
-                            acc[d] *= alpha;
-                        }
+                float alpha = 0.0f;
+                float p = 0.0f;
+                softmax::online_softmax_step_fused_col1<1>(
+                    score_frag, sm_state, softmax_scale_log2e, is_first,
+                    [&](int, float a, float prob) {
+                        alpha = a;
+                        p = prob;
                     });
-                float p = score_frag[0][0];
 
                 #pragma unroll
-                for (int d = 0; d < KernelConfig::HeadDim; ++d) {
-                    float vv = to_float(sV(j, d));
-                    acc[d] += p * vv;
+                for (int d = 0; d < kHalfHeadDim; ++d) {
+                    float vv = to_float(sV(j, col_base + d));
+                    acc[d] = acc[d] * alpha + p * vv;
                 }
             }
         }
@@ -162,11 +172,8 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
 
     if (local_row < KernelConfig::BlockM && global_row < args.seq_len) {
         softmax::online_softmax_finalize<1>(sm_state, [&](int, float inv_l) {
-            #pragma unroll
-            for (int d = 0; d < KernelConfig::HeadDim; ++d) {
-                O[o_base + static_cast<index_t>(global_row) * args.stride_seq_o + d] =
-                    from_float<Element>(acc[d] * inv_l);
-            }
+            loadstore::store_row_fragment<Element, index_t, kHalfHeadDim>(
+                O, o_base, global_row, args.stride_seq_o, col_base, acc, inv_l);
         });
     }
 }

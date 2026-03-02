@@ -1,170 +1,317 @@
-# Flash Attention Benchmark Framework
+# Flash Attention Benchmark / Profile Guide
 
-## 📁 Directory Structure
+This document describes the current benchmark and profiling pipeline under `benchmark/` and `scripts/`.
 
-```
+## Directory
+
+```text
 benchmark/
-├── cpp/                 # C++ benchmark programs (optional legacy path)
-│   ├── benchmark.cu      # Main performance benchmark
-│   ├── correctness.cu    # Correctness test
-│   ├── include/
-│   │   ├── perf_metrics.cuh
-│   │   └── test_configs.h
-│   └── CMakeLists.txt
-├── python/              # Python benchmark scripts
-│   ├── benchmark_pybind.py
-│   ├── benchmark_official_flashattn.py
-│   └── input_data.py
-└── data/
-    └── replay/          # placeholder for replay datasets
+  cpp/
+    benchmark.cu                  # profile_kernel source (C++ benchmark + NCU mode)
+    correctness.cu                # standalone C++ correctness helper
+    include/
+      perf_metrics.cuh
+      test_configs.h
+  python/
+    benchmark_pybind.py           # pybind vs pytorch
+    benchmark_official_flashattn.py # official flash-attn vs pytorch
+    input_data.py                 # random/structured/stress/replay input generation
+    tests/
+      test_pybind_interface.py
+      test_pybind_correctness.py
+      test_pybind_vs_official_correctness.py
+  data/replay/                    # replay input placeholder
+
+scripts/
+  run_python_benchmarks.sh
+  run_local_perf_gate.sh
+  run_correctness_gate.sh
+  run_compare_official_correctness.sh
+  smoke_python_bench.sh
+  auto_profile.sh
+  remote_config.example
 ```
 
-## 🚀 Quick Start
+## Build (C++ profile kernel)
 
-### 1. Build
+`profile_kernel` is built from the root CMake project (recommended path).
 
 ```bash
-cmake -S benchmark/cpp -B build_benchmark_cpp
-cmake --build build_benchmark_cpp -j
+cmake -S . -B build \
+  -DFA_BUILD_UTILS=ON \
+  -DFA_BUILD_TESTS=OFF \
+  -DFA_BUILD_EXAMPLES=OFF && \
+cmake --build build -j --target profile_kernel
 ```
 
-### 2. Run Benchmark
+Optional architecture pin:
 
 ```bash
-# Run all configs
-./build_benchmark_cpp/benchmark
-
-# Run specific config
-./build_benchmark_cpp/benchmark medium
+cmake -S . -B build \
+  -DFA_BUILD_UTILS=ON \
+  -DFA_BUILD_TESTS=OFF \
+  -DFA_BUILD_EXAMPLES=OFF \
+  -DCMAKE_CUDA_ARCHITECTURES=80 && \
+cmake --build build -j --target profile_kernel
 ```
 
-### 3. Run Correctness Test
+## C++ benchmark usage (`profile_kernel`)
+
+Binary:
 
 ```bash
-./build_benchmark_cpp/correctness
+./build/profile_kernel --help
 ```
 
-### 4. Benchmark Local Pybind Interface
+Modes:
+- `--mode benchmark` (default): warmup+repeat timing
+- `--mode ncu`: profiling-friendly defaults (`warmup=0`, `benchmark=1`)
+
+Examples:
 
 ```bash
-PYTHONPATH=python python3 benchmark/python/benchmark_pybind.py --seq_lens 1024,2048 --d_heads 64,128
+./build/profile_kernel \
+  --mode benchmark \
+  16x16x4096x128
 ```
-
-By default, results are also saved to `profile_results/pybind_<timestamp>.csv`.
-Use `--out_csv <path>` to override, or `--no_save` to disable file output.
-
-Benchmark official flash-attn separately:
 
 ```bash
-python3 benchmark/python/benchmark_official_flashattn.py --seq_lens 1024,2048 --d_heads 64,128 --dtype fp16
+./build/profile_kernel \
+  --mode ncu \
+  16x16x4096x128
 ```
-
-By default, results are also saved to `profile_results/official_<timestamp>.csv`.
-
-Choose relative-performance baseline (100% reference):
 
 ```bash
-python3 benchmark/python/benchmark_pybind.py --baseline fa2_pybind
-python3 benchmark/python/benchmark_official_flashattn.py --baseline flashattn_official
+./build/profile_kernel \
+  --mode benchmark \
+  --warmup-iters 10 \
+  --benchmark-iters 100 \
+  large
 ```
 
-Input data strategies:
+Accepted positional config:
+- preset name: `tiny|small|medium|large|all`
+- custom shape: `BxHxNxD` (for example `16x16x4096x128`)
+
+## Python benchmark usage
+
+Set import path first:
 
 ```bash
-# random (default)
-python3 benchmark/python/benchmark_pybind.py --input_mode random --seed 1234
-
-# structured deterministic pattern
-python3 benchmark/python/benchmark_pybind.py --input_mode structured
-
-# stress with sparse outliers
-python3 benchmark/python/benchmark_pybind.py --input_mode stress --seed 1234
-
-# replay from benchmark/data/replay/*.pt (or pass --replay_file)
-python3 benchmark/python/benchmark_pybind.py --input_mode replay --replay_dir benchmark/data/replay
+export PYTHONPATH="$PWD/python:${PYTHONPATH:-}"
 ```
 
-Run one-command smoke check (syntax + interface + correctness + tiny benchmark):
+### 1) Our pybind vs PyTorch
+
+```bash
+python3 benchmark/python/benchmark_pybind.py \
+  --seq_lens 1024,2048 \
+  --d_heads 64,128 \
+  --batch_size 16 \
+  --n_heads 16 \
+  --warmups 10 \
+  --repeats 50 \
+  --dtype fp16 \
+  --baseline pytorch
+```
+
+Notes:
+- `--dtype fp16` currently follows `forward_v3_tensor_core` path and only supports `d_head=128`.
+- CSV is saved to `profile_results/pybind_<timestamp>.csv` unless `--no_save`.
+
+### 2) Official flash-attn / PyTorch benchmark
+
+```bash
+python3 benchmark/python/benchmark_official_flashattn.py \
+  --seq_lens 4096 \
+  --d_heads 128 \
+  --batch_size 16 \
+  --n_heads 16 \
+  --dtype fp16 \
+  --kernels both \
+  --baseline pytorch
+```
+
+Kernel selection:
+- `--kernels both`
+- `--kernels official`
+- `--kernels pytorch`
+
+Baseline constraints:
+- `baseline=pytorch` requires `kernels=both|pytorch`
+- `baseline=flashattn_official` requires `kernels=both|official`
+
+Official package import path defaults to:
+- `~/flash-attention`
+
+## Input data modes
+
+Both python benchmark scripts support:
+- `--input_mode random`
+- `--input_mode structured`
+- `--input_mode stress`
+- `--input_mode replay --replay_dir benchmark/data/replay [--replay_file xxx.pt]`
+
+## Correctness gates
+
+Pybind vs PyTorch:
+
+```bash
+./scripts/run_correctness_gate.sh \
+  --dtype fp16 \
+  --input_mode random \
+  --seed 1234 \
+  --cases "2x4x128x128,2x4x256x128,2x4x512x128"
+```
+
+Pybind vs official flash-attn:
+
+```bash
+./scripts/run_compare_official_correctness.sh \
+  --dtype fp16 \
+  --input_mode random \
+  --seed 1234 \
+  --cases "2x4x128x128,2x4x256x128,2x4x512x128" \
+  --official_path "$HOME/flash-attention"
+```
+
+Smoke check:
 
 ```bash
 ./scripts/smoke_python_bench.sh
 ```
 
-Run correctness gate only (non-zero exit on fail, emits JSON/CSV report):
+## Combined python runner
+
+`run_python_benchmarks.sh` always runs pybind; official benchmark is optional.
+
+Pybind only:
 
 ```bash
-./scripts/run_correctness_gate.sh
+./scripts/run_python_benchmarks.sh \
+  --seq_lens 4096 \
+  --d_heads 128 \
+  --batch_size 16 \
+  --n_heads 16 \
+  --pybind_dtype fp16 \
+  --skip_official
 ```
 
-Run pybind + official benchmark and merge CSV automatically:
+Pybind + official + merged CSV:
 
 ```bash
-./scripts/run_python_benchmarks.sh --seq_lens 1024,2048 --d_heads 64,128
+./scripts/run_python_benchmarks.sh \
+  --seq_lens 4096 \
+  --d_heads 128 \
+  --batch_size 16 \
+  --n_heads 16 \
+  --pybind_dtype fp16 \
+  --official_dtype fp16 \
+  --run_official
 ```
 
-Merge existing CSV files only:
+## Local performance gate (auto build + benchmark + optional NCU)
+
+This script is intended for fast local iteration and logging:
+- rebuilds `profile_kernel`
+- runs pybind vs pytorch benchmark
+- emits a summary CSV row with:
+  - `time, commit, gpu, shape, variant`
+  - `mean_ms/tflops/rel_perf`
+  - `regs/spill`
+  - `achieved_occ_pct/global_load_B_per_sector/global_store_B_per_sector/top_stall` (empty when NCU is skipped)
 
 ```bash
-python3 scripts/merge_bench_csv.py --pybind_csv profile_results/pybind_xxx.csv --official_csv profile_results/official_xxx.csv --out_csv profile_results/merged_xxx.csv
+./scripts/run_local_perf_gate.sh \
+  --seq_len 4096 \
+  --d_head 128 \
+  --batch_size 16 \
+  --n_heads 16 \
+  --dtype fp16 \
+  --warmups 5 \
+  --repeats 20
 ```
 
-### 5. Profile with Nsight Compute
-
-Use `scripts/auto_profile.sh` for local/remote NCU workflows.
-
-## 📊 Test Configs
-
-| Config | B  | H  | N    | d   |
-|---------|-----|-----|------|-----|
-| tiny    | 2   | 4   | 512  | 64  |
-| small   | 4   | 8   | 1024 | 128 |
-| medium  | 8   | 16  | 2048 | 128 |
-| large   | 8   | 16  | 4096 | 128 |
-
-## 📝 Output Format
-
-### Console Output
-```
-========================================
-Config: medium
-========================================
-Shape: B=8, H=16, N=2048, d=128
-Time:  5.234 ms
-GFLOPS: 328.21
-Memory: 4.00 GB
-Bandwidth: 764.45 GB/s
-```
-
-### CSV Output
-```
-CSV,8,16,2048,128,5.234,328.21,65.2,4.00,764.45,49.2,52.43,52428.57
-```
-
-## 🔧 Performance Metrics
-
-- **GFLOPS**: Billions of floating point operations per second
-- **Compute Efficiency**: Actual FLOPS / A100 peak (156 TFLOPS)
-- **Bandwidth**: Memory transferred per second
-- **Bandwidth Utilization**: Actual bandwidth / A100 peak (1555 GB/s)
-- **Throughput**: Tokens processed per second
-
-## 🏷️  Version Management
-
-Use git tags to track different versions:
+Single-command mode with config:
 
 ```bash
-# Tag current version
-git tag -a v1.0-baseline -m "Initial baseline performance"
-
-# Checkout specific version
-git checkout v1.0-baseline
-
-# Compare versions
-git diff v1.0-baseline v2.0-optimized
+./scripts/run_local_perf_gate.sh \
+  --config scripts/local_perf_gate.example
 ```
 
-## 📖 References
+Each run creates a timestamped directory:
 
-- [DAO Flash Attention](https://github.com/Dao-AILab/flash-attention)
-- [Nsight Compute Documentation](https://docs.nvidia.com/nsight-compute/)
-- [A100 Architecture](https://www.nvidia.com/content/dam/en-zz/NVIDIA/downloads/nvidia-architecture-whitepapers/a100-whitepaper.pdf)
+```text
+profile_results/gate/<prefix>_<YYYYmmdd_HHMMSS>/
+```
+
+Outputs:
+- `profile_results/gate/compile_<ts>.log`
+- `profile_results/gate/pybind_<ts>.csv`
+- `profile_results/gate/ncu_<ts>.csv` (if enabled)
+- `profile_results/gate/summary_<ts>.csv`
+- `profile_results/gate_history.csv` (append-only aggregate)
+
+## Local / remote auto profiling
+
+`scripts/auto_profile.sh` is the orchestrator for:
+- local C++ benchmark run
+- local NCU run
+- remote compile + benchmark + NCU + result sync
+- optional official/pytorch python benchmark on remote
+
+Local examples:
+
+```bash
+./scripts/auto_profile.sh local \
+  --bench-config 16x16x4096x128 \
+  --ncu-config 16x16x4096x128 \
+  --run-benchmark \
+  --run-ncu
+```
+
+```bash
+./scripts/auto_profile.sh local \
+  --bench-config 16x16x4096x128 \
+  --skip-benchmark \
+  --run-ncu
+```
+
+Remote examples:
+
+```bash
+./scripts/auto_profile.sh remote ubuntu@<host> \
+  --ssh-key ~/.ssh/id_rsa \
+  --remote-arch 80 \
+  --only-ours \
+  --skip-benchmark \
+  --run-ncu \
+  --ncu-config 16x16x4096x128
+```
+
+```bash
+./scripts/auto_profile.sh remote \
+  --config scripts/remote_config.example
+```
+
+`scripts/remote_config.example` is the canonical config template. It supports:
+- target host/path/key/arch
+- run target selection (`all|ours|official|pytorch`)
+- unified `PROFILE_SHAPE=BxHxNxD`
+- official benchmark dtype/shape/input-mode controls
+- NCU set / launch-skip / launch-count
+
+## Output files
+
+Common output location:
+- `profile_results/`
+
+Typical files:
+- `pybind_<timestamp>.csv`
+- `official_<timestamp>.csv`
+- `merged_<timestamp>.csv`
+- `correctness/gate_<timestamp>.json|csv`
+- `correctness/pybind_vs_official_<timestamp>.json|csv`
+- `ncu_local_<timestamp>.ncu-rep`
+- `remote_<timestamp>.ncu-rep`
+- `official_remote_<timestamp>.csv`

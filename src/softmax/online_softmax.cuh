@@ -70,6 +70,31 @@ DEVICE void online_softmax_step(float (&scores)[Rows][Cols],
     }
 }
 
+template <int Rows, typename FusedAccFn>
+DEVICE void online_softmax_step_fused_col1(float (&scores)[Rows][1],
+                                           OnlineSoftmaxState<Rows>& st,
+                                           float softmax_scale,
+                                           bool is_first,
+                                           FusedAccFn&& fused_acc_update) {
+    float m_new[Rows];
+
+    #pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        float v = scores[r][0];
+        m_new[r] = is_first ? v : fmaxf(st.m[r], v);
+    }
+
+    #pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        float alpha = is_first ? 0.0f : renorm_coeff(st.m[r], m_new[r], softmax_scale);
+        float p = compute_p(scores[r][0], m_new[r], softmax_scale);
+        fused_acc_update(r, alpha, p);
+        st.m[r] = m_new[r];
+        st.l[r] = is_first ? p : (st.l[r] * alpha + p);
+        scores[r][0] = p;
+    }
+}
+
 template <int Rows, typename NormalizeAccFn>
 DEVICE void online_softmax_finalize(OnlineSoftmaxState<Rows>& st,
                                     NormalizeAccFn&& normalize_acc) {

@@ -66,11 +66,10 @@ DEVICE void copy_with_map_and_slice(TensorG const& gmem, TensorS& smem) {
             auto iter_coord = layout::make_coordinate(im, ik);
             auto g_iter = tensor::local_tile(g_warp, divided.inner, iter_coord);
             auto s_iter = tensor::local_tile(s_warp, divided.inner, iter_coord);
+            auto* g_ptr = &g_iter(lane_row, lane_col_base);
+            auto* s_ptr = &s_iter(lane_row, lane_col_base);
 
-            #pragma unroll
-            for (int x = 0; x < KernelConfig::copy_k; ++x) {
-                s_iter(lane_row, lane_col_base + x) = g_iter(lane_row, lane_col_base + x);
-            }
+            *reinterpret_cast<uint4*>(s_ptr) = *reinterpret_cast<const uint4*>(g_ptr);
         }
     }
 }
