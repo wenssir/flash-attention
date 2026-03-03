@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import math
 import statistics
 import subprocess
 import sys
@@ -10,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from input_data import generate_qkv
 
@@ -32,6 +32,7 @@ BATCH_SIZE_FOR_SEQ_LEN = {
 CSV_HEADER = (
     "mode,kernel,dtype,d_head,seq_len,batch_size,n_heads,warmups,repeats,stabilize,"
     "baseline,input_mode,mean_ms,median_ms,min_ms,max_ms,stddev_ms,rel_perf_pct,attn_tflops,"
+    "theoretical_flops,achieved_gflops,throughput_tokens_per_ms,throughput_tokens_per_s,io_bytes_est,est_bw_gbps,"
     "git_commit,gpu_name,torch_version,cuda_version"
 )
 
@@ -49,6 +50,16 @@ class BenchmarkStats:
         return 100.0 * baseline_mean / self.mean
 
 
+@dataclass
+class PerfExtras:
+    theoretical_flops: int
+    achieved_gflops: float
+    throughput_tokens_per_ms: float
+    throughput_tokens_per_s: float
+    io_bytes_est: int
+    est_bw_gbps: float
+
+
 def git_commit() -> str:
     try:
         return (
@@ -63,6 +74,39 @@ def git_commit() -> str:
 
 def calc_self_attn_flop(batch: int, heads: int, seq_len: int, d_head: int) -> int:
     return batch * heads * (4 * seq_len * seq_len * d_head + 6 * seq_len * seq_len)
+
+
+def bytes_per_dtype(dtype: torch.dtype) -> int:
+    if dtype in (torch.float16, torch.bfloat16):
+        return 2
+    if dtype == torch.float32:
+        return 4
+    raise ValueError(f"unsupported dtype for bytes_per_dtype: {dtype}")
+
+
+def calc_perf_extras(
+    stats: BenchmarkStats,
+    batch: int,
+    heads: int,
+    seq_len: int,
+    d_head: int,
+    elem_bytes: int,
+) -> PerfExtras:
+    theoretical_flops = calc_self_attn_flop(batch, heads, seq_len, d_head)
+    achieved_gflops = theoretical_flops / (stats.mean * 1e6)
+    tokens = batch * heads * seq_len
+    throughput_tokens_per_ms = tokens / stats.mean
+    throughput_tokens_per_s = throughput_tokens_per_ms * 1000.0
+    io_bytes_est = 4 * batch * heads * seq_len * d_head * elem_bytes
+    est_bw_gbps = io_bytes_est / (stats.mean * 1e6)
+    return PerfExtras(
+        theoretical_flops=theoretical_flops,
+        achieved_gflops=achieved_gflops,
+        throughput_tokens_per_ms=throughput_tokens_per_ms,
+        throughput_tokens_per_s=throughput_tokens_per_s,
+        io_bytes_est=io_bytes_est,
+        est_bw_gbps=est_bw_gbps,
+    )
 
 
 def summarize(samples_ms: list[float], attn_flops: int) -> BenchmarkStats:
@@ -83,10 +127,9 @@ def summarize(samples_ms: list[float], attn_flops: int) -> BenchmarkStats:
 
 
 def pytorch_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    scale = 1.0 / math.sqrt(q.shape[-1])
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-    probs = torch.softmax(scores, dim=-1)
-    return torch.matmul(probs, v)
+    return F.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False
+    )
 
 
 @torch.inference_mode()
@@ -138,7 +181,7 @@ def parse_args():
         "--baseline",
         type=str,
         default="pytorch",
-        choices=["pytorch", "fa2_pybind"],
+        choices=["pytorch", "official", "fa2_pybind", "flashattn_official"],
         help="kernel used as 100%% for rel_perf",
     )
     p.add_argument(
@@ -183,12 +226,12 @@ def print_table(title: str, rows: list[list[str]]):
         "d_head",
         "seq_len",
         "Mean(ms)",
-        "Median",
-        "Min",
-        "Max",
-        "StdDev",
+        "GFLOP/s",
+        "Tok/s(M)",
+        "BW(GB/s)",
         "RelPerf",
         "Attn TFLOP/s",
+        "TheoFLOPs(T)",
     ]
     widths = [max(len(str(x)) for x in [h] + [r[i] for r in rows]) for i, h in enumerate(header)]
     line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(header))
@@ -203,6 +246,7 @@ def print_table(title: str, rows: list[list[str]]):
 def csv_line(
     kernel: str,
     stats: BenchmarkStats,
+    extras: PerfExtras,
     baseline_mean: float,
     args,
     d_head: int,
@@ -215,6 +259,8 @@ def csv_line(
         f"{args.warmups},{args.repeats},{int(not args.no_stabilize)},{args.baseline},{args.input_mode},"
         f"{stats.mean:.6f},{stats.median:.6f},{stats.min:.6f},{stats.max:.6f},{stats.stddev:.6f},"
         f"{stats.relative_perf(baseline_mean):.2f},{stats.attn_tflops:.6f},"
+        f"{extras.theoretical_flops},{extras.achieved_gflops:.6f},{extras.throughput_tokens_per_ms:.6f},"
+        f"{extras.throughput_tokens_per_s:.6f},{extras.io_bytes_est},{extras.est_bw_gbps:.6f},"
         f"{meta['git_commit']},{meta['gpu_name']},{meta['torch_version']},{meta['cuda_version']}"
     )
 
@@ -277,60 +323,50 @@ def main():
             if replay_path is not None:
                 print(f"replay input: {replay_path}")
 
-            pt_fn = lambda: pytorch_attention(q, k, v)
             fa_fn = lambda: fa2.forward_timed(q, k, v)
-
-            pt_samples = benchmark_kernel(pt_fn, args.warmups, args.repeats, not args.no_stabilize, cache_buf)
             fa_samples = benchmark_kernel(fa_fn, args.warmups, args.repeats, not args.no_stabilize, cache_buf)
+            stats_map = {
+                "fa2_pybind": summarize(fa_samples, calc_self_attn_flop(batch_size, args.n_heads, seq_len, d_head))
+            }
 
             attn_flops = calc_self_attn_flop(batch_size, args.n_heads, seq_len, d_head)
-            stats_map = {
-                "pytorch": summarize(pt_samples, attn_flops),
-                "fa2_pybind": summarize(fa_samples, attn_flops),
-            }
-            baseline_mean = stats_map[args.baseline].mean
+            elem_bytes = bytes_per_dtype(input_dtype)
+            extras_map = {}
+            for k in stats_map:
+                extras_map[k] = calc_perf_extras(stats_map[k], batch_size, args.n_heads, seq_len, d_head, elem_bytes)
+            baseline_key = args.baseline
+            if baseline_key in ("official", "flashattn_official"):
+                baseline_key = "fa2_pybind"
+            if baseline_key not in stats_map:
+                baseline_key = "fa2_pybind"
+            baseline_mean = stats_map[baseline_key].mean
 
             if args.csv:
                 if first_csv:
                     print(CSV_HEADER)
                     first_csv = False
-                row_pt = csv_line("pytorch", stats_map["pytorch"], baseline_mean, args, d_head, seq_len, batch_size, meta)
-                row_fa = csv_line("fa2_pybind", stats_map["fa2_pybind"], baseline_mean, args, d_head, seq_len, batch_size, meta)
-                print(row_pt)
+                row_fa = csv_line("fa2_pybind", stats_map["fa2_pybind"], extras_map["fa2_pybind"], baseline_mean, args, d_head, seq_len, batch_size, meta)
                 print(row_fa)
-                csv_rows.extend([row_pt, row_fa])
+                csv_rows.append(row_fa)
                 continue
 
-            row_pt = csv_line("pytorch", stats_map["pytorch"], baseline_mean, args, d_head, seq_len, batch_size, meta)
-            row_fa = csv_line("fa2_pybind", stats_map["fa2_pybind"], baseline_mean, args, d_head, seq_len, batch_size, meta)
-            csv_rows.extend([row_pt, row_fa])
-
-            rows = [
-                [
-                    "pytorch",
-                    str(d_head),
-                    str(seq_len),
-                    f"{stats_map['pytorch'].mean:.4f}",
-                    f"{stats_map['pytorch'].median:.4f}",
-                    f"{stats_map['pytorch'].min:.4f}",
-                    f"{stats_map['pytorch'].max:.4f}",
-                    f"{stats_map['pytorch'].stddev:.4f}",
-                    f"{stats_map['pytorch'].relative_perf(baseline_mean):.2f}%",
-                    f"{stats_map['pytorch'].attn_tflops:.4f}",
-                ],
+            rows = []
+            row_fa = csv_line("fa2_pybind", stats_map["fa2_pybind"], extras_map["fa2_pybind"], baseline_mean, args, d_head, seq_len, batch_size, meta)
+            csv_rows.append(row_fa)
+            rows.append(
                 [
                     "fa2_pybind",
                     str(d_head),
                     str(seq_len),
                     f"{stats_map['fa2_pybind'].mean:.4f}",
-                    f"{stats_map['fa2_pybind'].median:.4f}",
-                    f"{stats_map['fa2_pybind'].min:.4f}",
-                    f"{stats_map['fa2_pybind'].max:.4f}",
-                    f"{stats_map['fa2_pybind'].stddev:.4f}",
+                    f"{extras_map['fa2_pybind'].achieved_gflops:.2f}",
+                    f"{extras_map['fa2_pybind'].throughput_tokens_per_s / 1e6:.2f}",
+                    f"{extras_map['fa2_pybind'].est_bw_gbps:.2f}",
                     f"{stats_map['fa2_pybind'].relative_perf(baseline_mean):.2f}%",
                     f"{stats_map['fa2_pybind'].attn_tflops:.4f}",
-                ],
-            ]
+                    f"{extras_map['fa2_pybind'].theoretical_flops / 1e12:.3f}",
+                ]
+            )
             print_table(
                 f"--- d_head={d_head}, seq_len={seq_len}, batch={batch_size}, heads={args.n_heads} ---",
                 rows,

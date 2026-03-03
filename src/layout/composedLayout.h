@@ -25,6 +25,11 @@ struct ComposedLayout {
     [[no_unique_address]] Offset      _offset;
     [[no_unique_address]] InnerLayout _inner;
 
+    HOST_DEVICE constexpr ComposedLayout()
+    requires(cxx::is_default_constructible_v<OuterLayout> &&
+           cxx::is_default_constructible_v<Offset> &&
+           cxx::is_default_constructible_v<InnerLayout>) = default;
+
     HOST_DEVICE constexpr ComposedLayout(OuterLayout const& o, Offset const& off, InnerLayout const& i)
         : _outer(o), _offset(off), _inner(i) {}
 

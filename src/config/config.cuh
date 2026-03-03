@@ -66,7 +66,12 @@ struct FlashFwdKernelConfig : public Base {
     static constexpr int BlockN = BLOCKN;
     static constexpr int HeadDim = HEADDIM;
     static constexpr int NWarps = NWARPS;
-    static constexpr int NThreads = NWarps * 32;
+    static constexpr int WarpSize = 32;
+    static constexpr int NThreads = NWarps * WarpSize;
+    static constexpr int RowsPerWarp = BlockM / NWarps;
+    static constexpr int HalfHeadDim = HeadDim / 2;
+    static constexpr int VecBytes = 16;
+    static constexpr float Log2e = 1.4426950408889634f;
 
     // For warp g2s copy of (BLOCKM/NWARPS, HEADDIM) = (16, 128):
     // 32 lanes arranged as (4,8), each lane copies 8 contiguous elems.
@@ -80,17 +85,24 @@ struct FlashFwdKernelConfig : public Base {
     static constexpr auto thread_shape_in_warp =
         layout::make_shape(numeric::Int<1>{}, numeric::Int<copy_k>{});
 
+    using SmemLayoutQLinear = decltype(layout::make_layout(
+        layout::make_shape(numeric::Int<BLOCKM>{}, numeric::Int<HEADDIM>{}),
+        layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{})));
+    using SmemLayoutKVLinear = decltype(layout::make_layout(
+        layout::make_shape(numeric::Int<BLOCKN>{}, numeric::Int<HEADDIM>{}),
+        layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{})));
+
     // Swizzled layouts (kept for future optimization, disabled now).
-    // using SmemLayoutQSwizzle = decltype(layout::composition(
-    //     tensor::Swizzle<3, 3, 3>{},
-    //     layout::make_layout(
-    //         layout::make_shape(numeric::Int<BLOCKM>{}, numeric::Int<HEADDIM>{}),
-    //         layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{}))));
-    // using SmemLayoutKVSwizzle = decltype(layout::composition(
-    //     tensor::Swizzle<3, 3, 3>{},
-    //     layout::make_layout(
-    //         layout::make_shape(numeric::Int<BLOCKN>{}, numeric::Int<HEADDIM>{}),
-    //         layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{}))));
+    using SmemLayoutQSwizzle = decltype(layout::composition(
+        tensor::Swizzle<3, 3, 3>{},
+        layout::make_layout(
+            layout::make_shape(numeric::Int<BLOCKM>{}, numeric::Int<HEADDIM>{}),
+            layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{}))));
+    using SmemLayoutKVSwizzle = decltype(layout::composition(
+        tensor::Swizzle<3, 3, 3>{},
+        layout::make_layout(
+            layout::make_shape(numeric::Int<BLOCKN>{}, numeric::Int<HEADDIM>{}),
+            layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{}))));
 
     using SmemLayoutQNoSwizzle = decltype(layout::composition(
         tensor::NoSwizzle{},

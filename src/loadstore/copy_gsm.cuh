@@ -44,7 +44,14 @@ DEVICE void copy_with_map_and_slice(TensorG const& gmem, TensorS& smem) {
     int lane_id = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
-    auto warp_layout = layout::make_layout(KernelConfig::warp_tile_shape, gmem.layout().stride());
+    auto g_shape = gmem.layout().shape();
+    int tile_rows = static_cast<int>(layout::get_shape_size(cxx::get<0>(g_shape)));
+    int tile_cols = static_cast<int>(layout::get_shape_size(cxx::get<1>(g_shape)));
+    int warp_rows = tile_rows / KernelConfig::NWarps;
+
+    auto warp_layout = layout::make_layout(
+        layout::make_shape(warp_rows, tile_cols),
+        gmem.layout().stride());
     auto g_warp = tensor::local_tile(gmem, warp_layout, Map::warp_coord(warp_id));
     auto s_warp = tensor::local_tile(smem, warp_layout, Map::warp_coord(warp_id));
 

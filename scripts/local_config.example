@@ -1,0 +1,46 @@
+# Local default config for scripts/local/run.sh
+
+# Identity / output
+RUN_NAME="local"
+OUTPUT_DIR="profile_results"
+
+# Shape / runtime
+PROFILE_SHAPE="16x16x4096x128"
+SEQ_LENS="4096,8192"
+D_HEADS="128"
+BATCH_SIZE="16"
+N_HEADS="16"
+WARMUPS="10"
+REPEATS="50"
+DTYPE="fp16"
+INPUT_MODE="random"
+SEED="1234"
+REPLAY_DIR="benchmark/data/replay"
+REPLAY_FILE=""
+BASELINE="pytorch"
+
+# Task toggles: default only pybind
+# Legacy toggles are still supported but not recommended.
+RUN_PYBIND="1"
+RUN_OFFICIAL="0"
+RUN_PYTORCH="0"
+RUN_PROFILE_BENCHMARK="1"
+RUN_NCU="0"
+STRICT_MODE="0"
+
+# Official benchmark options
+OFFICIAL_DTYPE="fp16"
+OFFICIAL_PYTORCH_DTYPE="match"
+OFFICIAL_PATH="$HOME/flash-attention"
+
+# Build / ncu
+BUILD_DIR="build"
+CUDA_ARCH=""
+TORCH_CUDA_ARCH_LIST=""
+CUDA_HOME="/usr/local/cuda"
+CUDACXX="/usr/local/cuda/bin/nvcc"
+NCU_CMD="/usr/local/cuda/bin/ncu"
+NCU_SET="full"
+NCU_LAUNCH_SKIP=""
+NCU_LAUNCH_COUNT=""
+NCU_USE_SUDO="0"

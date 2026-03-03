@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import math
 import statistics
 import subprocess
 import sys
@@ -10,13 +9,13 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from input_data import generate_qkv
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OFFICIAL_FA_PATH = Path.home() / "flash-attention"
-sys.path.insert(0, str(OFFICIAL_FA_PATH))
 
 BATCH_SIZE_FOR_SEQ_LEN = {
     512: 16,
@@ -30,6 +29,7 @@ BATCH_SIZE_FOR_SEQ_LEN = {
 CSV_HEADER = (
     "mode,kernel,dtype,d_head,seq_len,batch_size,n_heads,warmups,repeats,stabilize,"
     "baseline,input_mode,mean_ms,median_ms,min_ms,max_ms,stddev_ms,rel_perf_pct,attn_tflops,"
+    "theoretical_flops,achieved_gflops,throughput_tokens_per_ms,throughput_tokens_per_s,io_bytes_est,est_bw_gbps,"
     "git_commit,gpu_name,torch_version,cuda_version"
 )
 
@@ -47,6 +47,16 @@ class BenchmarkStats:
         return 100.0 * baseline_mean / self.mean
 
 
+@dataclass
+class PerfExtras:
+    theoretical_flops: int
+    achieved_gflops: float
+    throughput_tokens_per_ms: float
+    throughput_tokens_per_s: float
+    io_bytes_est: int
+    est_bw_gbps: float
+
+
 def git_commit() -> str:
     try:
         return (
@@ -61,6 +71,39 @@ def git_commit() -> str:
 
 def calc_self_attn_flop(batch: int, heads: int, seq_len: int, d_head: int) -> int:
     return batch * heads * (4 * seq_len * seq_len * d_head + 6 * seq_len * seq_len)
+
+
+def bytes_per_dtype(dtype: torch.dtype) -> int:
+    if dtype in (torch.float16, torch.bfloat16):
+        return 2
+    if dtype == torch.float32:
+        return 4
+    raise ValueError(f"unsupported dtype for bytes_per_dtype: {dtype}")
+
+
+def calc_perf_extras(
+    stats: BenchmarkStats,
+    batch: int,
+    heads: int,
+    seq_len: int,
+    d_head: int,
+    elem_bytes: int,
+) -> PerfExtras:
+    theoretical_flops = calc_self_attn_flop(batch, heads, seq_len, d_head)
+    achieved_gflops = theoretical_flops / (stats.mean * 1e6)
+    tokens = batch * heads * seq_len
+    throughput_tokens_per_ms = tokens / stats.mean
+    throughput_tokens_per_s = throughput_tokens_per_ms * 1000.0
+    io_bytes_est = 4 * batch * heads * seq_len * d_head * elem_bytes
+    est_bw_gbps = io_bytes_est / (stats.mean * 1e6)
+    return PerfExtras(
+        theoretical_flops=theoretical_flops,
+        achieved_gflops=achieved_gflops,
+        throughput_tokens_per_ms=throughput_tokens_per_ms,
+        throughput_tokens_per_s=throughput_tokens_per_s,
+        io_bytes_est=io_bytes_est,
+        est_bw_gbps=est_bw_gbps,
+    )
 
 
 def summarize(samples_ms: list[float], attn_flops: int) -> BenchmarkStats:
@@ -81,10 +124,9 @@ def summarize(samples_ms: list[float], attn_flops: int) -> BenchmarkStats:
 
 
 def pytorch_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    scale = 1.0 / math.sqrt(q.shape[-1])
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-    probs = torch.softmax(scores, dim=-1)
-    return torch.matmul(probs, v)
+    return F.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False
+    )
 
 
 @torch.inference_mode()
@@ -176,6 +218,12 @@ def parse_args():
         default="",
         help="specific replay file path (absolute or under replay_dir)",
     )
+    p.add_argument(
+        "--official_path",
+        type=str,
+        default=str(OFFICIAL_FA_PATH),
+        help="official flash-attention repo path",
+    )
     return p.parse_args()
 
 
@@ -191,12 +239,12 @@ def print_table(title: str, rows: list[list[str]]):
         "d_head",
         "seq_len",
         "Mean(ms)",
-        "Median",
-        "Min",
-        "Max",
-        "StdDev",
+        "GFLOP/s",
+        "Tok/s(M)",
+        "BW(GB/s)",
         "RelPerf",
         "Attn TFLOP/s",
+        "TheoFLOPs(T)",
     ]
     widths = [max(len(str(x)) for x in [h] + [r[i] for r in rows]) for i, h in enumerate(header)]
     line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(header))
@@ -211,6 +259,7 @@ def print_table(title: str, rows: list[list[str]]):
 def csv_line(
     kernel: str,
     stats: BenchmarkStats,
+    extras: PerfExtras,
     baseline_mean: float,
     args,
     d_head: int,
@@ -223,6 +272,8 @@ def csv_line(
         f"{args.warmups},{args.repeats},{int(not args.no_stabilize)},{args.baseline},{args.input_mode},"
         f"{stats.mean:.6f},{stats.median:.6f},{stats.min:.6f},{stats.max:.6f},{stats.stddev:.6f},"
         f"{stats.relative_perf(baseline_mean):.2f},{stats.attn_tflops:.6f},"
+        f"{extras.theoretical_flops},{extras.achieved_gflops:.6f},{extras.throughput_tokens_per_ms:.6f},"
+        f"{extras.throughput_tokens_per_s:.6f},{extras.io_bytes_est},{extras.est_bw_gbps:.6f},"
         f"{meta['git_commit']},{meta['gpu_name']},{meta['torch_version']},{meta['cuda_version']}"
     )
 
@@ -231,6 +282,8 @@ def main():
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
+    official_path = Path(args.official_path).expanduser()
+    sys.path.insert(0, str(official_path))
 
     run_official = args.kernels in ("both", "official")
     run_pytorch = args.kernels in ("both", "pytorch")
@@ -247,7 +300,7 @@ def main():
         except Exception as e:
             raise RuntimeError(
                 "Failed to import official flash-attn. "
-                f"Make sure it is installed and importable from {OFFICIAL_FA_PATH}. "
+                f"Make sure it is installed and importable from {official_path}. "
                 f"Original error: {e}"
             ) from e
 
@@ -267,7 +320,7 @@ def main():
     print(
         f"baseline={args.baseline}, dtype={args.dtype}, pytorch_dtype={args.pytorch_dtype}, "
         f"input_mode={args.input_mode}, seed={args.seed}, kernels={args.kernels}, "
-        f"official_path={OFFICIAL_FA_PATH}"
+        f"official_path={official_path}"
     )
     print()
 
@@ -302,10 +355,19 @@ def main():
 
             attn_flops = calc_self_attn_flop(batch_size, args.n_heads, seq_len, d_head)
             stats_map = {}
+            extras_map = {}
             if run_pytorch:
                 pt_fn = lambda: pytorch_attention(q, k, v)
                 pt_samples = benchmark_kernel(pt_fn, args.warmups, args.repeats, not args.no_stabilize, cache_buf)
                 stats_map["pytorch"] = summarize(pt_samples, attn_flops)
+                extras_map["pytorch"] = calc_perf_extras(
+                    stats_map["pytorch"],
+                    batch_size,
+                    args.n_heads,
+                    seq_len,
+                    d_head,
+                    bytes_per_dtype(pytorch_dtype),
+                )
             if run_official:
                 q_off = q.to(dtype=official_dtype).permute(0, 2, 1, 3).contiguous()
                 k_off = k.to(dtype=official_dtype).permute(0, 2, 1, 3).contiguous()
@@ -313,6 +375,14 @@ def main():
                 off_fn = lambda: flash_attn_func(q_off, k_off, v_off, 0.0, None, False)
                 off_samples = benchmark_kernel(off_fn, args.warmups, args.repeats, not args.no_stabilize, cache_buf)
                 stats_map["flashattn_official"] = summarize(off_samples, attn_flops)
+                extras_map["flashattn_official"] = calc_perf_extras(
+                    stats_map["flashattn_official"],
+                    batch_size,
+                    args.n_heads,
+                    seq_len,
+                    d_head,
+                    bytes_per_dtype(official_dtype),
+                )
             baseline_mean = stats_map[args.baseline].mean
 
             if args.csv:
@@ -320,13 +390,14 @@ def main():
                     print(CSV_HEADER)
                     first_csv = False
                 if run_pytorch:
-                    row_pt = csv_line("pytorch", stats_map["pytorch"], baseline_mean, args, d_head, seq_len, batch_size, meta)
+                    row_pt = csv_line("pytorch", stats_map["pytorch"], extras_map["pytorch"], baseline_mean, args, d_head, seq_len, batch_size, meta)
                     print(row_pt)
                     csv_rows.append(row_pt)
                 if run_official:
                     row_off = csv_line(
                         "flashattn_official",
                         stats_map["flashattn_official"],
+                        extras_map["flashattn_official"],
                         baseline_mean,
                         args,
                         d_head,
@@ -339,12 +410,13 @@ def main():
                 continue
 
             if run_pytorch:
-                row_pt = csv_line("pytorch", stats_map["pytorch"], baseline_mean, args, d_head, seq_len, batch_size, meta)
+                row_pt = csv_line("pytorch", stats_map["pytorch"], extras_map["pytorch"], baseline_mean, args, d_head, seq_len, batch_size, meta)
                 csv_rows.append(row_pt)
             if run_official:
                 row_off = csv_line(
                     "flashattn_official",
                     stats_map["flashattn_official"],
+                    extras_map["flashattn_official"],
                     baseline_mean,
                     args,
                     d_head,
@@ -362,12 +434,12 @@ def main():
                         str(d_head),
                         str(seq_len),
                         f"{stats_map['pytorch'].mean:.4f}",
-                        f"{stats_map['pytorch'].median:.4f}",
-                        f"{stats_map['pytorch'].min:.4f}",
-                        f"{stats_map['pytorch'].max:.4f}",
-                        f"{stats_map['pytorch'].stddev:.4f}",
+                        f"{extras_map['pytorch'].achieved_gflops:.2f}",
+                        f"{extras_map['pytorch'].throughput_tokens_per_s / 1e6:.2f}",
+                        f"{extras_map['pytorch'].est_bw_gbps:.2f}",
                         f"{stats_map['pytorch'].relative_perf(baseline_mean):.2f}%",
                         f"{stats_map['pytorch'].attn_tflops:.4f}",
+                        f"{extras_map['pytorch'].theoretical_flops / 1e12:.3f}",
                     ]
                 )
             if run_official:
@@ -377,12 +449,12 @@ def main():
                         str(d_head),
                         str(seq_len),
                         f"{stats_map['flashattn_official'].mean:.4f}",
-                        f"{stats_map['flashattn_official'].median:.4f}",
-                        f"{stats_map['flashattn_official'].min:.4f}",
-                        f"{stats_map['flashattn_official'].max:.4f}",
-                        f"{stats_map['flashattn_official'].stddev:.4f}",
+                        f"{extras_map['flashattn_official'].achieved_gflops:.2f}",
+                        f"{extras_map['flashattn_official'].throughput_tokens_per_s / 1e6:.2f}",
+                        f"{extras_map['flashattn_official'].est_bw_gbps:.2f}",
                         f"{stats_map['flashattn_official'].relative_perf(baseline_mean):.2f}%",
                         f"{stats_map['flashattn_official'].attn_tflops:.4f}",
+                        f"{extras_map['flashattn_official'].theoretical_flops / 1e12:.3f}",
                     ]
                 )
             print_table(

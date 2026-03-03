@@ -10,7 +10,7 @@
 
 #include "../../src/config/config.cuh"
 #include "../../src/forward/forward_v2_float4_double_buffer_prefetch.h"
-#include "../../src/forward/forward_v3_tensor_core.cuh"
+#include "../../src/forward/forward_v3_layout.cuh"
 
 namespace py = pybind11;
 

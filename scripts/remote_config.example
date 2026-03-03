@@ -1,56 +1,67 @@
-# Remote profile config for scripts/auto_profile.sh
-# Usage:
-#   ./scripts/auto_profile.sh remote --config scripts/remote_config.example
+# Config for scripts/local/run.sh and scripts/remote/run.sh
 
-# Remote target (optional if passed as CLI positional user@host)
-REMOTE_ADDR="ubuntu@62.169.159.221"
+# Remote connection (used by scripts/remote/run.sh)
+REMOTE_ADDR="ubuntu@62.169.159.148"
 REMOTE_PORT="22"
 REMOTE_PATH="/tmp/flash_attention_v2_profile"
-REMOTE_ARCH="80"  # 80 for A100/A30/A40, 90 for H100
 SSH_KEY_PATH="$HOME/.ssh/id_rsa"
+VENV_PATH="/home/ubuntu/fa-venv"
 
-# What to run: all | ours | official | pytorch
-# all      => run ours + official + pytorch
-# ours     => run only profile_kernel (plus NCU if enabled)
-# official => run only official flash-attn benchmark
-# pytorch  => run only pytorch benchmark (via benchmark_official_flashattn.py --kernels pytorch)
-RUN_TARGET="ours"
+# Pipeline identity
+RUN_NAME="remote"
+OUTPUT_DIR="profile_results"
 
-# Optional one-line shape for all three paths:
-# PROFILE_SHAPE="BxHxNxD"
-# If set, it overrides:
-#   OURS_BENCH_CONFIG, OURS_NCU_CONFIG,
-#   OFFICIAL_BATCH_SIZE, OFFICIAL_N_HEADS, OFFICIAL_SEQ_LENS, OFFICIAL_D_HEADS
+# Shape / runtime
 PROFILE_SHAPE="16x16x4096x128"
+SEQ_LENS="4096,8192"
+D_HEADS="128"
+BATCH_SIZE="16"
+N_HEADS="16"
+WARMUPS="10"
+REPEATS="50"
+DTYPE="fp16"
+INPUT_MODE="random"
+SEED="1234"
+REPLAY_DIR="benchmark/data/replay"
+REPLAY_FILE=""
+BASELINE="pytorch"
 
-# Fine-grained toggles (0/1). These are applied before RUN_TARGET.
-RUN_OURS=1
-RUN_OFFICIAL=1
-RUN_PYTORCH=1
-RUN_BENCHMARK=1
-RUN_NCU=1
-STRICT_MODE=0
+# Task toggles (default: only pybind)
+RUN_PYBIND="1"
+RUN_OFFICIAL="0"
+RUN_PYTORCH="0"
+RUN_PROFILE_BENCHMARK="1"
+RUN_NCU="0"
+STRICT_MODE="0"
 
-# Ours (C++ profile_kernel)
-# preset: tiny|small|medium|large|all
-# or custom shape: BxHxNxD, for example 16x16x4096x128
-OURS_BENCH_CONFIG="16x16x4096x128"
-OURS_NCU_CONFIG="16x16x4096x128"
+# Official benchmark options
+OFFICIAL_DTYPE="fp16"
+OFFICIAL_PYTORCH_DTYPE="match"
+OFFICIAL_PATH="$HOME/flash-attention"
+
+# Build / ncu
+BUILD_DIR="build"
+CUDA_ARCH=""
+TORCH_CUDA_ARCH_LIST="8.0"
+CUDA_HOME="/usr/local/cuda"
+CUDACXX="/usr/local/cuda/bin/nvcc"
+NCU_CMD="/usr/local/cuda/bin/ncu"
 NCU_SET="full"
-# Optional:
-# NCU_LAUNCH_SKIP="0"
-# NCU_LAUNCH_COUNT="1"
+NCU_LAUNCH_SKIP=""
+NCU_LAUNCH_COUNT=""
+NCU_USE_SUDO="1"
 
-# Official/PyTorch python benchmark shapes
-OFFICIAL_SEQ_LENS="4096"
-OFFICIAL_D_HEADS="128"
-OFFICIAL_BATCH_SIZE="16"
-OFFICIAL_N_HEADS="16"
-OFFICIAL_WARMUPS="10"
-OFFICIAL_REPEATS="50"
-OFFICIAL_DTYPE="fp16"            # fp16|bf16
-OFFICIAL_PYTORCH_DTYPE="match"   # match|fp32
-OFFICIAL_INPUT_MODE="random"     # random|structured|stress|replay
-OFFICIAL_SEED="1234"
-OFFICIAL_REPLAY_DIR="benchmark/data/replay"
-OFFICIAL_REPLAY_FILE=""
+# Backward-compatible options accepted by scripts/local/run.sh
+# RUN_TARGET="ours"               # all|ours|official|pytorch
+# OFFICIAL_SEQ_LENS="4096"
+# OFFICIAL_D_HEADS="128"
+# OFFICIAL_BATCH_SIZE="16"
+# OFFICIAL_N_HEADS="16"
+# OFFICIAL_WARMUPS="10"
+# OFFICIAL_REPEATS="50"
+# OFFICIAL_INPUT_MODE="random"
+# OFFICIAL_SEED="1234"
+# OFFICIAL_REPLAY_DIR="benchmark/data/replay"
+# OFFICIAL_REPLAY_FILE=""
+# RUN_BENCHMARK="1"
+# REMOTE_ARCH="80"

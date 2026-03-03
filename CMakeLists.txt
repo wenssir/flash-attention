@@ -67,7 +67,7 @@ set(FA_HEADERS
     src/utils/print.h
     src/forward/forward_v1_naive.h
     src/forward/forward_v2_float4_double_buffer_prefetch.h
-    src/forward/forward_v3_tensor_core.cuh
+    src/forward/forward_v3_layout.cuh
 )
 
 add_library(FlashAttentionV2 INTERFACE)

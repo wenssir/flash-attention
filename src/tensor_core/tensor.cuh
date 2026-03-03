@@ -91,7 +91,7 @@ HOST_DEVICE constexpr auto local_tile(TensorType && tensor, LayoutType sub_layou
     auto offset = layout::make_offset(container::tuple_scale(coord, sub_shape), tensor_stride);
     if constexpr (layout::is_composed_layout_v<decltype(layout)>) {
         auto tensor_offset = layout.offset();
-        offset = layout::make_offset(container::tuple_add(offset.shape(), tensor_offset.shape()), tensor_stride);
+        offset = layout::add_offset(offset, tensor_offset, tensor_stride);
         auto new_composed_layout = layout::ComposedLayout(layout.outer(), offset, layout::make_layout(sub_shape, tensor_stride));
         return tensor::Tensor(tensor.data_ptr(), new_composed_layout);
     } else {

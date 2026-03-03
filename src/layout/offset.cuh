@@ -32,4 +32,32 @@ HOST_DEVICE constexpr auto make_offset(Shape s, Stride d) {
     return Offset<Shape, Stride>(s, d);
 }
 
+template <typename ShapeA, typename StrideA, typename ShapeB, typename StrideB, typename Stride>
+HOST_DEVICE constexpr auto add_offset(Offset<ShapeA, StrideA> const& a,
+                                      Offset<ShapeB, StrideB> const& b,
+                                      Stride const& stride) {
+    return make_offset(container::tuple_add(a.shape(), b.shape()), stride);
+}
+
+template <typename ShapeA, typename StrideA, typename Stride>
+HOST_DEVICE constexpr auto add_offset(Offset<ShapeA, StrideA> const& a,
+                                      numeric::Int<0> const&,
+                                      Stride const& stride) {
+    return make_offset(a.shape(), stride);
+}
+
+template <typename ShapeB, typename StrideB, typename Stride>
+HOST_DEVICE constexpr auto add_offset(numeric::Int<0> const&,
+                                      Offset<ShapeB, StrideB> const& b,
+                                      Stride const& stride) {
+    return make_offset(b.shape(), stride);
+}
+
+template <typename Stride>
+HOST_DEVICE constexpr auto add_offset(numeric::Int<0> const&,
+                                      numeric::Int<0> const&,
+                                      Stride const&) {
+    return numeric::Int<0>{};
+}
+
 }

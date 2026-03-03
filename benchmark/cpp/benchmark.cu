@@ -8,7 +8,7 @@
 #include <limits>
 #include <algorithm>
 
-#include "../../src/forward/forward_v3_tensor_core.cuh"
+#include "../../src/forward/forward_v3_layout.cuh"
 #include "../../src/config/config.cuh"
 #include "include/test_configs.h"
 #include "include/perf_metrics.cuh"
@@ -132,6 +132,9 @@ BenchmarkResult run_benchmark(const TestConfig& cfg, const DevicePeakSpecs& peak
     for (int i = 0; i < benchmark_iters; i++) {
         forward::flash_attention_forward_v3_tensor_core<Config><<<grid, block, smem_size>>>(args);
     }
+    // Catch async launch/runtime errors before consuming timing results.
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
 

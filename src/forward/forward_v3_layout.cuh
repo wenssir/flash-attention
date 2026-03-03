@@ -50,6 +50,7 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     static_assert(KernelConfig::BlockN == constants::V3_BLOCK_N, "v3 baseline expects BlockN=64");
     static_assert(KernelConfig::NWarps == constants::V3_WARPS, "v3 baseline expects 4 warps");
     static_assert((KernelConfig::HeadDim % 2) == 0, "v3 split-row path requires even head_dim");
+    static_assert((KernelConfig::BlockM % KernelConfig::NWarps) == 0, "BlockM must be divisible by NWarps");
 
     int sample = blockIdx.z;
     int head = blockIdx.y;
@@ -57,20 +58,27 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     int tid = threadIdx.x;
     int lane = tid & 31;
     int warp = tid >> 5;
+    const int seq_len = args.seq_len;
+
+    // v3 path is specialized for a fixed head dimension.
+    if (args.head_dim != KernelConfig::HeadDim) {
+        return;
+    }
 
     extern __shared__ char smem_raw[];
     Element* smem_ptr = reinterpret_cast<Element*>(smem_raw);
 
-    auto smem_q_layout = layout::make_layout(
-        layout::make_shape(numeric::Int<KernelConfig::BlockM>{}, numeric::Int<KernelConfig::HeadDim>{}),
-        layout::make_stride(numeric::Int<KernelConfig::HeadDim>{}, numeric::Int<1>{}));
-    auto smem_kv_layout = layout::make_layout(
-        layout::make_shape(numeric::Int<KernelConfig::BlockN>{}, numeric::Int<KernelConfig::HeadDim>{}),
-        layout::make_stride(numeric::Int<KernelConfig::HeadDim>{}, numeric::Int<1>{}));
+    // auto smem_q_layout = KernelConfig::SmemLayoutQSwizzle();
+    // auto smem_kv_layout = KernelConfig::SmemLayoutKVSwizzle();
+    auto smem_q_layout = typename KernelConfig::SmemLayoutQLinear{};
+    auto smem_kv_layout = typename KernelConfig::SmemLayoutKVLinear{};
 
     auto sQ = tensor::make_tensor(smem_ptr, smem_q_layout);
     auto sK = tensor::make_tensor(sQ.data_ptr() + sQ.size(), smem_kv_layout);
     auto sV = tensor::make_tensor(sK.data_ptr() + sK.size(), smem_kv_layout);
+    auto sQ_layout = sQ.layout();
+    auto sK_layout = sK.layout();
+    auto sV_layout = sV.layout();
 
     Element* Q = static_cast<Element*>(args.Q);
     Element* K = static_cast<Element*>(args.K);
@@ -83,11 +91,14 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     index_t o_base = static_cast<index_t>(sample) * args.stride_batch_o + static_cast<index_t>(head) * args.stride_head_o;
 
     auto gQ = tensor::make_tensor(Q + q_base,
-        layout::make_layout(layout::make_shape(args.seq_len, args.head_dim), layout::make_stride(args.stride_seq_q, 1)));
+        layout::make_layout(layout::make_shape(seq_len, numeric::Int<KernelConfig::HeadDim>{}),
+                            layout::make_stride(args.stride_seq_q, 1)));
     auto gK = tensor::make_tensor(K + k_base,
-        layout::make_layout(layout::make_shape(args.seq_len, args.head_dim), layout::make_stride(args.stride_seq_k, 1)));
+        layout::make_layout(layout::make_shape(seq_len, numeric::Int<KernelConfig::HeadDim>{}),
+                            layout::make_stride(args.stride_seq_k, 1)));
     auto gV = tensor::make_tensor(V + v_base,
-        layout::make_layout(layout::make_shape(args.seq_len, args.head_dim), layout::make_stride(args.stride_seq_v, 1)));
+        layout::make_layout(layout::make_shape(seq_len, numeric::Int<KernelConfig::HeadDim>{}),
+                            layout::make_stride(args.stride_seq_v, 1)));
 
     auto q_tile_layout = layout::make_layout(
         layout::make_shape(numeric::Int<KernelConfig::BlockM>{}, numeric::Int<KernelConfig::HeadDim>{}),
@@ -100,25 +111,23 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
     loadstore::copy_tile<KernelConfig>(sQ, gQTile, loadstore::CopyG2SOp{});
     __syncthreads();
 
-    constexpr int kRowsPerWarp = KernelConfig::BlockM / KernelConfig::NWarps;
-    constexpr int kHalfHeadDim = KernelConfig::HeadDim / 2;
     int row_in_warp = lane >> 1;
     int half = lane & 1;
-    int col_base = half * kHalfHeadDim;
-    int local_row = warp * kRowsPerWarp + row_in_warp;
+    int col_base = half * KernelConfig::HalfHeadDim;
+    int local_row = warp * KernelConfig::RowsPerWarp + row_in_warp;
     int global_row = q_tile * KernelConfig::BlockM + local_row;
 
-    float acc[kHalfHeadDim];
+    float acc[KernelConfig::HalfHeadDim];
     #pragma unroll
-    for (int d = 0; d < kHalfHeadDim; ++d) {
+    for (int d = 0; d < KernelConfig::HalfHeadDim; ++d) {
         acc[d] = 0.0f;
     }
     softmax::OnlineSoftmaxState<1> sm_state;
 
-    constexpr float kLog2e = 1.4426950408889634f;
-    const float softmax_scale_log2e = args.softmax_scale * kLog2e;
+    const float softmax_scale_log2e = args.softmax_scale * KernelConfig::Log2e;
 
-    for (int kv_tile = 0; kv_tile < args.seq_len / KernelConfig::BlockN; ++kv_tile) {
+    const int n_kv_tiles = seq_len / KernelConfig::BlockN;
+    for (int kv_tile = 0; kv_tile < n_kv_tiles; ++kv_tile) {
         auto gKTile = tensor::local_tile(gK, kv_tile_layout, layout::make_coordinate(kv_tile, 0));
         auto gVTile = tensor::local_tile(gV, kv_tile_layout, layout::make_coordinate(kv_tile, 0));
 
@@ -126,7 +135,8 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
         loadstore::copy_tile<KernelConfig>(sV, gVTile, loadstore::CopyG2SOp{});
         __syncthreads();
 
-        if (local_row < KernelConfig::BlockM && global_row < args.seq_len) {
+        if (local_row < KernelConfig::BlockM && global_row < seq_len) {
+            Element* q_row_ptr = sQ.data_ptr() + sQ_layout(local_row, col_base);
             if (kv_tile == 0) {
                 softmax::online_softmax_init(sm_state);
             }
@@ -134,12 +144,14 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
             // #pragma unroll
             for (int j = 0; j < KernelConfig::BlockN; ++j) {
                 int global_col = kv_tile * KernelConfig::BlockN + j;
+                Element* k_row_ptr = sK.data_ptr() + sK_layout(j, col_base);
+                Element* v_row_ptr = sV.data_ptr() + sV_layout(j, col_base);
 
                 float partial = 0.0f;
                 #pragma unroll
-                for (int d = 0; d < kHalfHeadDim; ++d) {
-                    float qv = to_float(sQ(local_row, col_base + d));
-                    float kv = to_float(sK(j, col_base + d));
+                for (int d = 0; d < KernelConfig::HalfHeadDim; ++d) {
+                    float qv = to_float(q_row_ptr[d]);
+                    float kv = to_float(k_row_ptr[d]);
                     partial += qv * kv;
                 }
                 float score = partial + __shfl_xor_sync(0xffffffffu, partial, 1);
@@ -160,8 +172,8 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
                     });
 
                 #pragma unroll
-                for (int d = 0; d < kHalfHeadDim; ++d) {
-                    float vv = to_float(sV(j, col_base + d));
+                for (int d = 0; d < KernelConfig::HalfHeadDim; ++d) {
+                    float vv = to_float(v_row_ptr[d]);
                     acc[d] = acc[d] * alpha + p * vv;
                 }
             }
@@ -170,9 +182,9 @@ __global__ void flash_attention_forward_v3_tensor_core(const config::ForwardKern
         __syncthreads();
     }
 
-    if (local_row < KernelConfig::BlockM && global_row < args.seq_len) {
+    if (local_row < KernelConfig::BlockM && global_row < seq_len) {
         softmax::online_softmax_finalize<1>(sm_state, [&](int, float inv_l) {
-            loadstore::store_row_fragment<Element, index_t, kHalfHeadDim>(
+            loadstore::store_row_fragment<Element, index_t, KernelConfig::HalfHeadDim>(
                 O, o_base, global_row, args.stride_seq_o, col_base, acc, inv_l);
         });
     }
