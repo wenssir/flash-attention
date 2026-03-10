@@ -1,7 +1,7 @@
 # Config for scripts/local/run.sh and scripts/remote/run.sh
 
 # Remote connection (used by scripts/remote/run.sh)
-REMOTE_ADDR="ubuntu@62.169.159.148"
+REMOTE_ADDR="ubuntu@62.169.159.125"
 REMOTE_PORT="22"
 REMOTE_PATH="/tmp/flash_attention_v2_profile"
 SSH_KEY_PATH="$HOME/.ssh/id_rsa"
@@ -41,7 +41,7 @@ OFFICIAL_PATH="$HOME/flash-attention"
 
 # Build / ncu
 BUILD_DIR="build"
-CUDA_ARCH=""
+CUDA_ARCH="80"
 TORCH_CUDA_ARCH_LIST="8.0"
 CUDA_HOME="/usr/local/cuda"
 CUDACXX="/usr/local/cuda/bin/nvcc"

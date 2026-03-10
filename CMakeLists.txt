@@ -60,6 +60,7 @@ set(FA_HEADERS
     src/softmax/online_softmax.cuh
     src/loadstore/load_func.cuh
     src/loadstore/store_func.cuh
+    src/loadstore/thread_map.cuh
     src/loadstore/copy_gsm.cuh
     src/loadstore/copy_srm.cuh
     src/loadstore/ldmatrix_coord.cuh
@@ -68,6 +69,7 @@ set(FA_HEADERS
     src/forward/forward_v1_naive.h
     src/forward/forward_v2_float4_double_buffer_prefetch.h
     src/forward/forward_v3_layout.cuh
+    src/forward/forward_v4_mma.cuh
 )
 
 add_library(FlashAttentionV2 INTERFACE)
@@ -168,6 +170,9 @@ if(FA_BUILD_UTILS)
     add_executable(profile_kernel benchmark/cpp/benchmark.cu)
     target_link_libraries(profile_kernel PRIVATE fa::fa CUDA::cudart_static)
     set_target_properties(profile_kernel PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    add_executable(correctness_v4 benchmark/cpp/correctness_v4.cu)
+    target_link_libraries(correctness_v4 PRIVATE fa::fa CUDA::cudart_static)
+    set_target_properties(correctness_v4 PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
 if(FA_BUILD_EXAMPLES)

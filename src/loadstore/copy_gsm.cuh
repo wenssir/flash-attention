@@ -1,91 +1,174 @@
 #pragma once
 
-#include "../config/macros.cuh"
-#include "../layout/layout.h"
-#include "../layout/coordinate.h"
+#include <cstdint>
+
 #include "../tensor_core/tensor.cuh"
-#include "../utils/print.h"
+#include "../config/macros.cuh"
+#include "../layout/coordinate.h"
+#include "../layout/layout.h"
+#include "./thread_map.cuh"
 
 namespace loadstore {
 
-template <typename KernelConfig>
-struct ThreadMap {
-    static constexpr int kThreadM = KernelConfig::thread_m;
-    static constexpr int kThreadK = KernelConfig::thread_k;
-    static constexpr int kCopyK = KernelConfig::copy_k;
-
-    DEVICE static constexpr auto warp_coord(int warp_id) {
-        return layout::make_coordinate(warp_id, 0);
-    }
-
-    DEVICE static constexpr auto thread_coord(int lane_id) {
-        int tr = lane_id / kThreadK;
-        int tc = lane_id % kThreadK;
-        return layout::make_coordinate(tr, tc);
-    }
-
-    DEVICE static constexpr auto iter_coord(int ik) {
-        return layout::make_coordinate(0, ik);
+template <typename Element>
+struct GM2SMVec {
+    DEVICE static void copy(Element const* gmem, Element* smem) {
+        *reinterpret_cast<uint4*>(smem) = *reinterpret_cast<uint4 const*>(gmem);
     }
 };
 
-template <typename KernelConfig>
-DEVICE constexpr auto make_iter_tile_shape() {
-    return layout::make_shape(
-        numeric::Int<KernelConfig::thread_m>{},
-        numeric::Int<KernelConfig::thread_k * KernelConfig::copy_k>{}
-    );
+template <typename Map, typename TensorG, typename TensorS>
+DEVICE void copy_g2s(TensorG const& gmem, TensorS& smem) {
+    using Element = typename Map::Element;
+    static_assert((Map::kVecElems * static_cast<int>(sizeof(Element))) == 16,
+                  "copy_g2s expects 16-byte copy per lane");
+
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+
+    auto lane_coord = Map::lane_coord(lane);
+    int base_row = Map::warp_row_base(warp) + static_cast<int>(cxx::get<0>(lane_coord));
+    int base_col = static_cast<int>(cxx::get<1>(lane_coord));
+
+    #pragma unroll
+    for (int ir = 0; ir < Map::IterRows; ++ir) {
+        int row_delta = Map::row_advance(ir);
+        #pragma unroll
+        for (int ic = 0; ic < Map::IterCols; ++ic) {
+            int col_delta = Map::col_advance(ic);
+            auto coord = layout::make_coordinate(base_row + row_delta, base_col + col_delta);
+            GM2SMVec<Element>::copy(
+                &gmem(coord),
+                &smem(coord));
+        }
+    }
+}
+
+template <typename Map, typename TensorG, typename TensorS>
+DEVICE void copy_g2s_predicated(TensorG const& gmem, TensorS& smem, int valid_rows) {
+    using Element = typename Map::Element;
+    static_assert((Map::kVecElems * static_cast<int>(sizeof(Element))) == 16,
+                  "copy_g2s_predicated expects 16-byte copy per lane");
+    int tid = threadIdx.x;
+    int lane = tid & 31;
+    int warp = tid >> 5;
+
+    auto lane_coord = Map::lane_coord(lane);
+    int base_row = Map::warp_row_base(warp) + static_cast<int>(cxx::get<0>(lane_coord));
+    int base_col = static_cast<int>(cxx::get<1>(lane_coord));
+
+    #pragma unroll
+    for (int ir = 0; ir < Map::IterRows; ++ir) {
+        int row_delta = Map::row_advance(ir);
+        int row = base_row + row_delta;
+        #pragma unroll
+        for (int ic = 0; ic < Map::IterCols; ++ic) {
+            int col_delta = Map::col_advance(ic);
+            auto coord = layout::make_coordinate(row, base_col + col_delta);
+            Element* s_ptr = &smem(coord);
+            if (row < valid_rows) {
+                GM2SMVec<Element>::copy(
+                    &gmem(coord),
+                    s_ptr);
+            } else {
+                *reinterpret_cast<uint4*>(s_ptr) = make_uint4(0, 0, 0, 0);
+            }
+        }
+    }
 }
 
 template <typename KernelConfig, typename TensorG, typename TensorS>
-DEVICE void copy_with_map_and_slice(TensorG const& gmem, TensorS& smem) {
-    using Map = ThreadMap<KernelConfig>;
+DEVICE void copy_g2s_q(TensorG const& gmem, TensorS& smem) {
+    using Map = G2SLayoutThreadMap<
+        KernelConfig, KernelConfig::BlockM, KernelConfig::HeadDim, KernelConfig::copy_k>;
+    copy_g2s<Map>(gmem, smem);
+}
 
-    int lane_id = threadIdx.x % 32;
-    int warp_id = threadIdx.x / 32;
+template <typename KernelConfig, typename TensorG, typename TensorS>
+DEVICE void copy_g2s_q_predicated(TensorG const& gmem, TensorS& smem, int valid_rows) {
+    using Map = G2SLayoutThreadMap<
+        KernelConfig, KernelConfig::BlockM, KernelConfig::HeadDim, KernelConfig::copy_k>;
+    copy_g2s_predicated<Map>(gmem, smem, valid_rows);
+}
 
-    auto g_shape = gmem.layout().shape();
-    int tile_rows = static_cast<int>(layout::get_shape_size(cxx::get<0>(g_shape)));
-    int tile_cols = static_cast<int>(layout::get_shape_size(cxx::get<1>(g_shape)));
-    int warp_rows = tile_rows / KernelConfig::NWarps;
+template <typename KernelConfig, typename TensorG, typename TensorS>
+DEVICE void copy_g2s_kv(TensorG const& gmem, TensorS& smem) {
+    using Map = G2SLayoutThreadMap<
+        KernelConfig, KernelConfig::BlockN, KernelConfig::HeadDim, KernelConfig::copy_k>;
+    copy_g2s<Map>(gmem, smem);
+}
 
-    auto warp_layout = layout::make_layout(
-        layout::make_shape(warp_rows, tile_cols),
-        gmem.layout().stride());
-    auto g_warp = tensor::local_tile(gmem, warp_layout, Map::warp_coord(warp_id));
-    auto s_warp = tensor::local_tile(smem, warp_layout, Map::warp_coord(warp_id));
-
-    auto iter_tile_shape = make_iter_tile_shape<KernelConfig>();
-    auto divided = layout::zipped_divide(warp_layout, iter_tile_shape);
-    auto outer_shape = divided.outer.shape();
-    int iter_m = static_cast<int>(layout::get_shape_size(cxx::get<0>(outer_shape)));
-    int iter_k = static_cast<int>(layout::get_shape_size(cxx::get<1>(outer_shape)));
-
-    auto lane_coord = Map::thread_coord(lane_id);
-    int lane_row = cxx::get<0>(lane_coord);
-    int lane_col = cxx::get<1>(lane_coord);
-    int lane_col_base = lane_col * KernelConfig::copy_k;
-
-    #pragma unroll
-    for (int im = 0; im < iter_m; ++im) {
-        #pragma unroll
-        for (int ik = 0; ik < iter_k; ++ik) {
-            auto iter_coord = layout::make_coordinate(im, ik);
-            auto g_iter = tensor::local_tile(g_warp, divided.inner, iter_coord);
-            auto s_iter = tensor::local_tile(s_warp, divided.inner, iter_coord);
-            auto* g_ptr = &g_iter(lane_row, lane_col_base);
-            auto* s_ptr = &s_iter(lane_row, lane_col_base);
-
-            *reinterpret_cast<uint4*>(s_ptr) = *reinterpret_cast<const uint4*>(g_ptr);
-        }
-    }
+template <typename KernelConfig, typename TensorG, typename TensorS>
+DEVICE void copy_g2s_kv_predicated(TensorG const& gmem, TensorS& smem, int valid_rows) {
+    using Map = G2SLayoutThreadMap<
+        KernelConfig, KernelConfig::BlockN, KernelConfig::HeadDim, KernelConfig::copy_k>;
+    copy_g2s_predicated<Map>(gmem, smem, valid_rows);
 }
 
 struct CopyG2SOp {
   template <typename KernelConfig, typename TensorS, typename TensorG>
   DEVICE void operator()(TensorS& smem, TensorG const& gmem) const {
-    copy_with_map_and_slice<KernelConfig>(gmem, smem);
+    copy_g2s_q<KernelConfig>(gmem, smem);
   }
 };
+
+struct CopyG2SKVOp {
+  template <typename KernelConfig, typename TensorS, typename TensorG>
+  DEVICE void operator()(TensorS& smem, TensorG const& gmem) const {
+    copy_g2s_kv<KernelConfig>(gmem, smem);
+  }
+};
+
+template <typename KernelConfig, typename TensorQ, typename TensorGQ>
+DEVICE void load_q(TensorQ& sQ, TensorGQ const& gQTile, int valid_q_rows) {
+    if (valid_q_rows == KernelConfig::BlockM) {
+        copy_g2s_q<KernelConfig>(gQTile, sQ);
+    } else {
+        copy_g2s_q_predicated<KernelConfig>(gQTile, sQ, valid_q_rows);
+    }
+}
+
+template <typename KernelConfig, typename TensorK, typename TensorGKLayout>
+DEVICE void load_k(
+    TensorK& sK,
+    typename KernelConfig::Element* K,
+    typename KernelConfig::index_t k_base,
+    TensorGKLayout const& gk_layout,
+    int kv_block_idx,
+    int seq_len,
+    int stride_seq_k
+) {
+    using index_t = typename KernelConfig::index_t;
+    index_t k_offset = static_cast<index_t>(kv_block_idx * KernelConfig::BlockN) * stride_seq_k;
+    auto gKTile = tensor::make_tensor(K + k_base + k_offset, gk_layout);
+    int valid_k_rows = max(0, min(KernelConfig::BlockN, seq_len - kv_block_idx * KernelConfig::BlockN));
+    if (valid_k_rows == KernelConfig::BlockN) {
+        copy_g2s_kv<KernelConfig>(gKTile, sK);
+    } else {
+        copy_g2s_kv_predicated<KernelConfig>(gKTile, sK, valid_k_rows);
+    }
+}
+
+template <typename KernelConfig, typename TensorV, typename TensorGVLayout>
+DEVICE void load_v(
+    TensorV& sV,
+    typename KernelConfig::Element* V,
+    typename KernelConfig::index_t v_base,
+    TensorGVLayout const& gv_layout,
+    int kv_block_idx,
+    int seq_len,
+    int stride_seq_v
+) {
+    using index_t = typename KernelConfig::index_t;
+    index_t v_offset = static_cast<index_t>(kv_block_idx * KernelConfig::BlockN) * stride_seq_v;
+    auto gVTile = tensor::make_tensor(V + v_base + v_offset, gv_layout);
+    int valid_v_rows = max(0, min(KernelConfig::BlockN, seq_len - kv_block_idx * KernelConfig::BlockN));
+    if (valid_v_rows == KernelConfig::BlockN) {
+        copy_g2s_kv<KernelConfig>(gVTile, sV);
+    } else {
+        copy_g2s_kv_predicated<KernelConfig>(gVTile, sV, valid_v_rows);
+    }
+}
 
 } // namespace loadstore

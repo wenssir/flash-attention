@@ -16,13 +16,13 @@ __global__ void copy_gsm_v3_kernel(float const* gmem, float* smem_like) {
     );
     auto g_tensor = tensor::make_tensor(gmem, l);
     auto s_tensor = tensor::make_tensor(smem_like, l);
-    loadstore::copy_with_map_and_slice<Cfg>(g_tensor, s_tensor);
+    loadstore::copy_g2s_q<Cfg>(g_tensor, s_tensor);
 }
 
 } // namespace
 
 TEST(CopyGsmV3Test, BoundsAndCorrectness_64x128_4Warps) {
-    using Cfg = config::ForwardV3Config;
+    using Cfg = config::ForwardConfig;
     constexpr int M = Cfg::BlockM;
     constexpr int K = Cfg::HeadDim;
     constexpr int Count = M * K;

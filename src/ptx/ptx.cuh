@@ -47,7 +47,7 @@ struct MMA_M16N8K16_F16 {
 
 template<typename T>
 struct LDMATRIX_X4 {
-    DEVICE void operator()(T* smem, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) const {
+    DEVICE static void load(T* smem, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
         static_assert(std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>, "ldmatrix only support fp16/bf16");
 
         uint32_t smem_int_ptr = __cvta_generic_to_shared(smem);
@@ -63,7 +63,7 @@ struct LDMATRIX_X4 {
 
 template<typename T>
 struct LDMATRIX_X4_TRANS {
-    DEVICE void operator()(T* smem, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) const {
+    DEVICE static void load(T* smem, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
         static_assert(std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>, "ldmatrix only support fp16/bf16");
 
         uint32_t smem_int_ptr = __cvta_generic_to_shared(smem);
@@ -79,7 +79,7 @@ struct LDMATRIX_X4_TRANS {
 
 template<typename T>
 struct LDMATRIX_X2 {
-    DEVICE void operator()(T* smem, uint32_t& r0, uint32_t& r1) const {
+    DEVICE static void load(T* smem, uint32_t& r0, uint32_t& r1) {
         static_assert(std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>, "ldmatrix only support fp16/bf16");
 
         uint32_t smem_int_ptr = __cvta_generic_to_shared(smem);
@@ -95,7 +95,7 @@ struct LDMATRIX_X2 {
 
 template<typename T>
 struct LDMATRIX_X1 {
-    DEVICE void operator()(T* smem, uint32_t& r0) const {
+    DEVICE static void load(T* smem, uint32_t& r0) {
         static_assert(std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>, "ldmatrix only support fp16/bf16");
 
         uint32_t smem_int_ptr = __cvta_generic_to_shared(smem);
@@ -111,7 +111,7 @@ struct LDMATRIX_X1 {
 
 template<typename T>
 struct LDMATRIX_X2_TRANS {
-    DEVICE void operator()(T* smem, uint32_t& r0, uint32_t& r1) const {
+    DEVICE static void load(T* smem, uint32_t& r0, uint32_t& r1) {
         static_assert(std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>, "ldmatrix only support fp16/bf16");
 
         uint32_t smem_int_ptr = __cvta_generic_to_shared(smem);

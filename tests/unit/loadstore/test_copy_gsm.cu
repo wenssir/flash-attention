@@ -7,6 +7,8 @@ namespace {
 
 template <int WarpM, int WarpK, int ThreadM, int ThreadK, int CopyK>
 struct TestKernelConfig {
+    using Element = float;
+    static constexpr int NWarps = 1;
     static constexpr int thread_m = ThreadM;
     static constexpr int thread_k = ThreadK;
     static constexpr int copy_k = CopyK;
@@ -24,8 +26,12 @@ __global__ void copy_gsm_kernel(float const* gmem, float* smem_like) {
 
     auto g_tensor = tensor::make_tensor(gmem, layout_2d);
     auto s_tensor = tensor::make_tensor(smem_like, layout_2d);
-
-    loadstore::copy_with_map_and_slice<KernelConfig>(g_tensor, s_tensor);
+    using Map = loadstore::G2SLayoutThreadMap<
+        KernelConfig,
+        static_cast<int>(cxx::get<0>(KernelConfig::warp_tile_shape)),
+        static_cast<int>(cxx::get<1>(KernelConfig::warp_tile_shape)),
+        KernelConfig::copy_k>;
+    loadstore::copy_g2s<Map>(g_tensor, s_tensor);
 }
 
 template <typename KernelConfig, int M, int K>

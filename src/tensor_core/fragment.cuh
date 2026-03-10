@@ -35,21 +35,17 @@ struct Fragment{
 
     template <typename Tensor>
     DEVICE void load(Tensor& tensor, int lane_id) {
-        Helper helper;
-        auto coord = helper(lane_id);
+        auto coord = Helper::coord(lane_id);
 
         T* ptr = &tensor(coord);
 
         using Ldmatrix = typename Helper::Ldmatrix;
         if constexpr (REGS_PER_LANE == 4) {
-            Ldmatrix ldm;
-            ldm(ptr, regs[0], regs[1], regs[2], regs[3]);
+            Ldmatrix::load(ptr, regs[0], regs[1], regs[2], regs[3]);
         } else if constexpr (REGS_PER_LANE == 2) {
-            Ldmatrix ldm;
-            ldm(ptr, regs[0], regs[1]);
+            Ldmatrix::load(ptr, regs[0], regs[1]);
         } else if constexpr (REGS_PER_LANE == 1) {
-            Ldmatrix ldm;
-            ldm(ptr, regs[0]);
+            Ldmatrix::load(ptr, regs[0]);
         }
     }
 
@@ -73,11 +69,58 @@ struct Fragment{
     }
 };
 
+template <typename T, int N>
+struct AccumFragment {
+    static_assert(std::is_same_v<T, float>, "AccumFragment currently supports float accumulator only");
+    static_assert(N > 0, "AccumFragment size must be positive");
+
+    static constexpr int kRegs = N;
+
+    T regs[N];
+
+    DEVICE constexpr AccumFragment() {
+        #pragma unroll
+        for (int i = 0; i < N; ++i) {
+            regs[i] = T(0);
+        }
+    }
+
+    DEVICE T& operator()(int idx) {
+        return regs[idx];
+    }
+
+    DEVICE const T& operator()(int idx) const {
+        return regs[idx];
+    }
+
+    DEVICE void clear() {
+        #pragma unroll
+        for (int i = 0; i < N; ++i) {
+            regs[i] = T(0);
+        }
+    }
+
+    DEVICE constexpr int size() const {
+        return N;
+    }
+
+    DEVICE T* data_ptr() {
+        return regs;
+    }
+
+    DEVICE const T* data_ptr() const {
+        return regs;
+    }
+};
+
 template <typename T>
 struct is_fragment : cxx::false_type {};
 
 template <typename T, typename Helper, int ROWS, int COLS>
 struct is_fragment<Fragment<T, Helper, ROWS, COLS>> : cxx::true_type {};
+
+template <typename T, int N>
+struct is_fragment<AccumFragment<T, N>> : cxx::true_type {};
 
 template <typename T>
 constexpr bool is_fragment_v = is_fragment<cxx::remove_cv_t<cxx::remove_reference_t<T>>>::value;

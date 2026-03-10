@@ -8,8 +8,9 @@
 #include <limits>
 #include <algorithm>
 
-#include "../../src/forward/forward_v3_layout.cuh"
 #include "../../src/config/config.cuh"
+#include "../../src/forward/forward_v4_mma.cuh"
+#include "../../src/utils/util_func.cuh"
 #include "include/test_configs.h"
 #include "include/perf_metrics.cuh"
 
@@ -24,7 +25,7 @@
     } while(0)
 
 using Element = __half;
-using Config = config::ForwardV3Config;
+using Config = config::ForwardConfig;
 
 void print_gpu_info() {
     int device_count;
@@ -115,11 +116,15 @@ BenchmarkResult run_benchmark(const TestConfig& cfg, const DevicePeakSpecs& peak
     // Compute grid dimensions
     dim3 grid((N + Config::BlockM - 1) / Config::BlockM, H, B);
     dim3 block(Config::NThreads);
-    size_t smem_size = forward::forward_v3_smem_bytes<Config>();
+    size_t smem_size = forward::forward_smem_bytes<Config>();
+    CUDA_CHECK(cudaFuncSetAttribute(
+        forward::flash_attention_forward_v4_mma<Config>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_size)));
 
     // Warmup
     for (int i = 0; i < warmup_iters; i++) {
-        forward::flash_attention_forward_v3_tensor_core<Config><<<grid, block, smem_size>>>(args);
+        forward::flash_attention_forward_v4_mma<Config><<<grid, block, smem_size>>>(args);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -130,7 +135,7 @@ BenchmarkResult run_benchmark(const TestConfig& cfg, const DevicePeakSpecs& peak
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < benchmark_iters; i++) {
-        forward::flash_attention_forward_v3_tensor_core<Config><<<grid, block, smem_size>>>(args);
+        forward::flash_attention_forward_v4_mma<Config><<<grid, block, smem_size>>>(args);
     }
     // Catch async launch/runtime errors before consuming timing results.
     CUDA_CHECK(cudaGetLastError());

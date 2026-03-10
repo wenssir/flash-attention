@@ -10,7 +10,7 @@
 
 #include "../../src/config/config.cuh"
 #include "../../src/forward/forward_v2_float4_double_buffer_prefetch.h"
-#include "../../src/forward/forward_v3_layout.cuh"
+#include "../../src/forward/forward_v4_mma.cuh"
 
 namespace py = pybind11;
 
@@ -66,7 +66,7 @@ inline void validate_inputs(
     const auto n = q.size(2);
     if (q.dtype() == torch::kFloat16) {
         TORCH_CHECK(d == 128, "fp16 path currently supports d_head=128 only");
-        TORCH_CHECK((n % config::ForwardV3Config::BlockM) == 0, "fp16 path requires seq_len divisible by 64");
+        TORCH_CHECK((n % config::ForwardConfig::BlockM) == 0, "fp16 path requires seq_len divisible by BlockM");
     } else {
         if (d == 64) {
             TORCH_CHECK((n % KernelTile<64>::BlockM) == 0, "seq_len must be divisible by 32 for d=64");
@@ -126,17 +126,17 @@ void launch_kernel(
         );
 }
 
-void launch_v3_fp16(
+void launch_v4_fp16(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
     torch::Tensor& o
 ) {
-    using Config = config::ForwardV3Config;
+    using Config = config::ForwardConfig;
 
-    TORCH_CHECK(q.dtype() == torch::kFloat16, "v3 fp16 path expects fp16 input");
-    TORCH_CHECK(static_cast<int>(q.size(3)) == Config::HeadDim, "v3 fp16 path expects d_head=128");
-    TORCH_CHECK((q.size(2) % Config::BlockM) == 0, "v3 fp16 path expects seq_len divisible by 64");
+    TORCH_CHECK(q.dtype() == torch::kFloat16, "v4 fp16 path expects fp16 input");
+    TORCH_CHECK(static_cast<int>(q.size(3)) == Config::HeadDim, "v4 fp16 path expects fixed d_head");
+    TORCH_CHECK((q.size(2) % Config::BlockM) == 0, "v4 fp16 path expects seq_len divisible by BlockM");
 
     config::ForwardKernelArgs args{};
     args.Q = q.data_ptr();
@@ -169,10 +169,18 @@ void launch_v3_fp16(
         static_cast<unsigned int>(q.size(0))
     );
     dim3 block(Config::NThreads);
-    size_t smem = static_cast<size_t>(forward::forward_v3_smem_bytes<Config>());
+    size_t smem = static_cast<size_t>(forward::forward_v4_smem_bytes<Config>());
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    forward::flash_attention_forward_v3_tensor_core<Config><<<grid, block, smem, stream>>>(args);
+    auto set_attr_err = cudaFuncSetAttribute(
+        forward::flash_attention_forward_v4_mma<Config>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem));
+    TORCH_CHECK(
+        set_attr_err == cudaSuccess,
+        "Failed to set MaxDynamicSharedMemorySize for v4 kernel: ",
+        cudaGetErrorString(set_attr_err));
+    forward::flash_attention_forward_v4_mma<Config><<<grid, block, smem, stream>>>(args);
 }
 
 std::tuple<torch::Tensor, float> fa_forward(
@@ -197,7 +205,7 @@ std::tuple<torch::Tensor, float> fa_forward(
     }
 
     if (in_dtype == torch::kFloat16) {
-        launch_v3_fp16(q, k, v, o);
+        launch_v4_fp16(q, k, v, o);
     } else {
         const int d = static_cast<int>(q.size(3));
         if (d == 64) {

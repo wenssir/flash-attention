@@ -11,6 +11,8 @@ namespace {
 
 template <int M, int K, int ThreadM = 1, int ThreadK = 1, int CopyK = 1>
 struct TestCfg {
+    using Element = float;
+    static constexpr int NWarps = 1;
     static constexpr int thread_m = ThreadM;
     static constexpr int thread_k = ThreadK;
     static constexpr int copy_k = CopyK;
@@ -25,8 +27,12 @@ __global__ void copy_g2s_kernel(float* smem_like, float const* gmem) {
     );
     auto s_tensor = tensor::make_tensor(smem_like, l);
     auto g_tensor = tensor::make_tensor(gmem, l);
-    loadstore::CopyG2SOp op{};
-    op.template operator()<KernelConfig>(s_tensor, g_tensor);
+    using Map = loadstore::G2SLayoutThreadMap<
+        KernelConfig,
+        static_cast<int>(cxx::get<0>(KernelConfig::warp_tile_shape)),
+        static_cast<int>(cxx::get<1>(KernelConfig::warp_tile_shape)),
+        KernelConfig::copy_k>;
+    loadstore::copy_g2s<Map>(g_tensor, s_tensor);
 }
 
 template <typename KernelConfig>
@@ -168,4 +174,3 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-

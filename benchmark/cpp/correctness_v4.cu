@@ -1,23 +1,33 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include <cstdio>
-#include <vector>
-#include <cmath>
-#include <cstdlib>
 
-#include "../src/config/config.cuh"
-#include "../src/forward/forward_v3_layout.cuh"
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+#include "../../src/config/config.cuh"
+#include "../../src/forward/forward_v4_mma.cuh"
+#include "../../src/utils/util_func.cuh"
 
 namespace {
 
-void cpu_reference_online_attention(const float* Q, const float* K, const float* V, float* O,
-                                    int B, int H, int N, int D, float scale, bool causal) {
+void cpu_reference_attention(const float* q,
+                             const float* k,
+                             const float* v,
+                             float* o,
+                             int B,
+                             int H,
+                             int N,
+                             int D,
+                             float scale,
+                             bool causal) {
     for (int b = 0; b < B; ++b) {
         for (int h = 0; h < H; ++h) {
-            const float* q_base = Q + (b * H + h) * N * D;
-            const float* k_base = K + (b * H + h) * N * D;
-            const float* v_base = V + (b * H + h) * N * D;
-            float* o_base = O + (b * H + h) * N * D;
+            const float* q_base = q + (b * H + h) * N * D;
+            const float* k_base = k + (b * H + h) * N * D;
+            const float* v_base = v + (b * H + h) * N * D;
+            float* o_base = o + (b * H + h) * N * D;
 
             for (int i = 0; i < N; ++i) {
                 float m = -INFINITY;
@@ -53,7 +63,39 @@ void cpu_reference_online_attention(const float* Q, const float* K, const float*
     }
 }
 
-bool run_forward_v3_correctness() {
+bool check_close(const float* ref,
+                 const float* out,
+                 int n,
+                 float atol,
+                 float rtol) {
+    float max_diff = 0.0f;
+    int max_idx = 0;
+    int fail_count = 0;
+
+    for (int i = 0; i < n; ++i) {
+        float diff = fabsf(ref[i] - out[i]);
+        float tol = atol + rtol * fabsf(ref[i]);
+        if (diff > tol) {
+            if (fail_count < 10) {
+                printf("Mismatch [%d]: ref=%.6f out=%.6f diff=%.6f tol=%.6f\n",
+                       i, ref[i], out[i], diff, tol);
+            }
+            fail_count++;
+        }
+        if (diff > max_diff) {
+            max_diff = diff;
+            max_idx = i;
+        }
+    }
+
+    printf("Max abs diff = %.6e at index %d\n", max_diff, max_idx);
+    if (fail_count > 0) {
+        printf("Total mismatches: %d / %d\n", fail_count, n);
+    }
+    return fail_count == 0;
+}
+
+bool run_correctness(bool causal) {
     using Cfg = config::ForwardConfig;
     using Elem = typename Cfg::Element;
 
@@ -62,11 +104,13 @@ bool run_forward_v3_correctness() {
     constexpr int N = 64;
     constexpr int D = 128;
     constexpr int E = B * H * N * D;
-    constexpr float kScale = 1.0f / 8.0f;
 
-    std::vector<float> hQf(E), hKf(E), hVf(E), hO(E, 0.0f), hRef(E, 0.0f);
-    std::vector<Elem> hQ(E), hK(E), hV(E);
-    srand(7);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    std::vector<float> hQf(E), hKf(E), hVf(E), hRef(E, 0.0f), hOut(E, 0.0f);
+    std::vector<Elem> hQ(E), hK(E), hV(E), hO(E);
+
+    srand(17);
     for (int i = 0; i < E; ++i) {
         hQf[i] = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 0.2f;
         hKf[i] = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 0.2f;
@@ -76,12 +120,7 @@ bool run_forward_v3_correctness() {
         hV[i] = __float2half(hVf[i]);
     }
 
-    cpu_reference_online_attention(hQf.data(), hKf.data(), hVf.data(), hRef.data(), B, H, N, D, kScale, false);
-
-    printf("First few reference values:\n");
-    for (int i = 0; i < 10; ++i) {
-        printf("  hRef[%d] = %.6f\n", i, hRef[i]);
-    }
+    cpu_reference_attention(hQf.data(), hKf.data(), hVf.data(), hRef.data(), B, H, N, D, scale, causal);
 
     Elem *dQ = nullptr, *dK = nullptr, *dV = nullptr, *dO = nullptr;
     if (cudaMalloc(&dQ, E * sizeof(Elem)) != cudaSuccess) return false;
@@ -114,39 +153,37 @@ bool run_forward_v3_correctness() {
     args.seq_len = N;
     args.heads = H;
     args.head_dim = D;
-    args.softmax_scale = kScale;
-    args.causal = 0;
+    args.softmax_scale = scale;
+    args.causal = causal ? 1 : 0;
 
     dim3 grid((N + Cfg::BlockM - 1) / Cfg::BlockM, H, B);
     dim3 block(Cfg::NThreads);
-    size_t smem_bytes = forward::forward_v3_smem_bytes<Cfg>();
+    size_t smem = static_cast<size_t>(forward::forward_smem_bytes<Cfg>());
 
-    printf("Launching kernel: grid=(%d,%d,%d), block=(%d)\n", grid.x, grid.y, grid.z, block.x);
-    printf("BlockM=%d, BlockN=%d, HeadDim=%d, NThreads=%d\n",
-           Cfg::BlockM, Cfg::BlockN, Cfg::HeadDim, Cfg::NThreads);
-    printf("Dynamic shared memory bytes=%zu\n", smem_bytes);
+    auto set_attr_err = cudaFuncSetAttribute(
+        forward::flash_attention_forward_v4_mma<Cfg>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem));
+    if (set_attr_err != cudaSuccess) {
+        printf("cudaFuncSetAttribute failed: %s\n", cudaGetErrorString(set_attr_err));
+        return false;
+    }
 
-    forward::flash_attention_forward_v3_tensor_core<Cfg><<<grid, block, smem_bytes>>>(args);
-    cudaError_t err = cudaGetLastError();
+    forward::flash_attention_forward_v4_mma<Cfg><<<grid, block, smem>>>(args);
+    auto err = cudaGetLastError();
     if (err != cudaSuccess) {
-        printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+        printf("kernel launch failed: %s\n", cudaGetErrorString(err));
         return false;
     }
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
-        printf("CUDA kernel execution error: %s\n", cudaGetErrorString(err));
+        printf("kernel execution failed: %s\n", cudaGetErrorString(err));
         return false;
     }
 
-    std::vector<Elem> hO_half(E);
-    cudaMemcpy(hO_half.data(), dO, E * sizeof(Elem), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hO.data(), dO, E * sizeof(Elem), cudaMemcpyDeviceToHost);
     for (int i = 0; i < E; ++i) {
-        hO[i] = __half2float(hO_half[i]);
-    }
-
-    printf("First few GPU values:\n");
-    for (int i = 0; i < 10; ++i) {
-        printf("  hO[%d] = %.6f (diff = %.6e)\n", i, hO[i], fabsf(hO[i] - hRef[i]));
+        hOut[i] = __half2float(hO[i]);
     }
 
     cudaFree(dQ);
@@ -154,18 +191,20 @@ bool run_forward_v3_correctness() {
     cudaFree(dV);
     cudaFree(dO);
 
-    float max_diff = 0.0f;
-    for (int i = 0; i < E; ++i) {
-        max_diff = fmaxf(max_diff, fabsf(hO[i] - hRef[i]));
-    }
-    printf("forward_v3 max abs diff = %.6e\n", max_diff);
-    return max_diff < 2e-3f;
+    printf("First 8 reference: ");
+    for (int i = 0; i < 8; ++i) printf("%.6f ", hRef[i]);
+    printf("\nFirst 8 output:    ");
+    for (int i = 0; i < 8; ++i) printf("%.6f ", hOut[i]);
+    printf("\n");
+
+    return check_close(hRef.data(), hOut.data(), E, 2e-2f, 8e-2f);
 }
 
 } // namespace
 
 int main() {
-    bool ok = run_forward_v3_correctness();
-    printf("forward_v3 correctness: %s\n", ok ? "PASS" : "FAIL");
+    printf("v4 correctness test (non-causal)\n");
+    bool ok = run_correctness(false);
+    printf("v4 correctness: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

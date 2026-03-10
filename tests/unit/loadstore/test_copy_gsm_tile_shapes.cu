@@ -9,6 +9,7 @@
 namespace {
 
 struct CopyCfg16x128 : public config::KernelConfig<float> {
+    using Element = float;
     static constexpr int BlockM = 16;
     static constexpr int BlockN = 64;
     static constexpr int HeadDim = 128;
@@ -30,7 +31,8 @@ __global__ void copy_gsm_tile_kernel(float const* gmem, float* out) {
     );
     auto g_tensor = tensor::make_tensor(gmem, tile_layout);
     auto out_tensor = tensor::make_tensor(out, tile_layout);
-    loadstore::copy_with_map_and_slice<Cfg>(g_tensor, out_tensor);
+    using Map = loadstore::G2SLayoutThreadMap<Cfg, Cfg::BlockM, Cfg::HeadDim, Cfg::copy_k>;
+    loadstore::copy_g2s<Map>(g_tensor, out_tensor);
 }
 
 template <typename Cfg>
