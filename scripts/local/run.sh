@@ -53,6 +53,7 @@ NCU_SET="full"
 NCU_LAUNCH_SKIP=""
 NCU_LAUNCH_COUNT=""
 NCU_USE_SUDO="0"
+NCU_TARGET="profile_kernel"
 
 # Auto-load local default config if present.
 if [[ -f "$DEFAULT_CONFIG_FILE" ]]; then
@@ -107,6 +108,7 @@ Options:
   --ncu-launch-skip <int>
   --ncu-launch-count <int>
   --ncu-use-sudo <0|1>
+  --ncu-target <profile_kernel>
 
   --profile-shape BxHxNxD
   --skip-ncu                 compatibility alias, force disable ncu
@@ -136,6 +138,7 @@ while [[ $# -gt 0 ]]; do
     --official) SELECTED_ANY="1"; shift ;;
     --pytorch) SELECTED_ANY="1"; shift ;;
     --profile-benchmark) SELECTED_ANY="1"; shift ;;
+    --profile-benchmark-v5-narrow) SELECTED_ANY="1"; shift ;;
     --ncu) SELECTED_ANY="1"; shift ;;
 
     --seq-lens) SEQ_LENS="$2"; shift 2 ;;
@@ -165,6 +168,7 @@ while [[ $# -gt 0 ]]; do
     --ncu-launch-skip) NCU_LAUNCH_SKIP="$2"; shift 2 ;;
     --ncu-launch-count) NCU_LAUNCH_COUNT="$2"; shift 2 ;;
     --ncu-use-sudo) NCU_USE_SUDO="$2"; shift 2 ;;
+    --ncu-target) NCU_TARGET="$2"; shift 2 ;;
 
     --profile-shape) PROFILE_SHAPE="$2"; PROFILE_SHAPE_SET="1"; shift 2 ;;
     --skip-ncu) RUN_NCU="0"; shift ;;
@@ -220,6 +224,7 @@ fi
 [[ -n "${NCU_SET:-}" ]] && NCU_SET="$NCU_SET"
 [[ -n "${NCU_LAUNCH_SKIP:-}" ]] && NCU_LAUNCH_SKIP="$NCU_LAUNCH_SKIP"
 [[ -n "${NCU_LAUNCH_COUNT:-}" ]] && NCU_LAUNCH_COUNT="$NCU_LAUNCH_COUNT"
+[[ -n "${NCU_TARGET:-}" ]] && NCU_TARGET="$NCU_TARGET"
 
 # For NCU on remote hosts, prefer absolute path and sudo.
 if [[ "$RUN_NCU" == "1" ]]; then
@@ -313,6 +318,7 @@ cmd=(
   --ncu-launch-skip "$NCU_LAUNCH_SKIP"
   --ncu-launch-count "$NCU_LAUNCH_COUNT"
   --ncu-use-sudo "$NCU_USE_SUDO"
+  --ncu-target "$NCU_TARGET"
 )
 
 [[ -n "$RUN_ID" ]] && cmd+=(--run-id "$RUN_ID")

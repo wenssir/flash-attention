@@ -1,7 +1,7 @@
 # Config for scripts/local/run.sh and scripts/remote/run.sh
 
 # Remote connection (used by scripts/remote/run.sh)
-REMOTE_ADDR="ubuntu@62.169.159.125"
+REMOTE_ADDR="ubuntu@"
 REMOTE_PORT="22"
 REMOTE_PATH="/tmp/flash_attention_v2_profile"
 SSH_KEY_PATH="$HOME/.ssh/id_rsa"
@@ -50,6 +50,7 @@ NCU_SET="full"
 NCU_LAUNCH_SKIP=""
 NCU_LAUNCH_COUNT=""
 NCU_USE_SUDO="1"
+NCU_TARGET="profile_kernel"
 
 # Backward-compatible options accepted by scripts/local/run.sh
 # RUN_TARGET="ours"               # all|ours|official|pytorch

@@ -135,6 +135,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ncu-launch-skip", default="")
     p.add_argument("--ncu-launch-count", default="")
     p.add_argument("--ncu-use-sudo", type=int, default=0)
+    p.add_argument("--ncu-target", default="profile_kernel",
+                   choices=["profile_kernel"])
     return p.parse_args()
 
 
@@ -308,16 +310,16 @@ def main() -> None:
 
     # 4) ncu
     if args.run_ncu == 1:
-        if args.run_profile_benchmark == 1 and not profile_kernel_bench_ok:
+        if args.ncu_target == "profile_kernel" and args.run_profile_benchmark == 1 and not profile_kernel_bench_ok:
             summary["tasks"]["ncu"] = {"skipped": True, "reason": "profile_kernel benchmark failed"}
             # Skip NCU to avoid hanging on invalid runtime state/device errors.
             args.run_ncu = 0
     if args.run_ncu == 1:
-        exe = (REPO_ROOT / args.build_dir / "profile_kernel").resolve()
+        exe = (REPO_ROOT / args.build_dir / args.ncu_target).resolve()
         if not exe.exists():
             ok = _ensure_profile_kernel(args, env, run_dir, strict)
             if not ok and strict:
-                raise RuntimeError("profile_kernel build required for ncu failed")
+                raise RuntimeError(f"{args.ncu_target} build required for ncu failed")
         if exe.exists():
             ncu_rep = artifacts_dir / f"{run_id}.ncu-rep"
             b, h, n, d = _parse_shape(args.profile_shape)
@@ -332,7 +334,7 @@ def main() -> None:
                 ncu_cmd.extend(["--launch-count", args.ncu_launch_count])
             ncu_cmd.extend([str(exe), "--mode", "ncu", shape])
             rc = _run(ncu_cmd, cwd=exe.parent, env=env, log_path=logs_dir / "ncu.log")
-            summary["tasks"]["ncu"] = {"rc": rc, "report": str(ncu_rep)}
+            summary["tasks"]["ncu"] = {"rc": rc, "report": str(ncu_rep), "target": args.ncu_target}
             if rc != 0 and strict:
                 raise RuntimeError("ncu failed")
 

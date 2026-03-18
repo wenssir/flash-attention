@@ -10,7 +10,7 @@
 
 #include "../../src/config/config.cuh"
 #include "../../src/utils/util_func.cuh"
-#include "../../src/forward/forward_v5_mma.cuh"
+#include "../../src/forward/forward_v6_mma.cuh"
 
 namespace py = pybind11;
 
@@ -56,7 +56,7 @@ inline void validate_inputs(
     }
 }
 
-void launch_v5_fp16(
+void launch_fp16(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
@@ -64,9 +64,9 @@ void launch_v5_fp16(
 ) {
     using Config = config::ForwardConfig;
 
-    TORCH_CHECK(q.dtype() == torch::kFloat16, "v5 fp16 path expects fp16 input");
-    TORCH_CHECK(static_cast<int>(q.size(3)) == Config::HeadDim, "v5 fp16 path expects fixed d_head");
-    TORCH_CHECK((q.size(2) % Config::BlockM) == 0, "v5 fp16 path expects seq_len divisible by BlockM");
+    TORCH_CHECK(q.dtype() == torch::kFloat16, "fp16 path expects fp16 input");
+    TORCH_CHECK(static_cast<int>(q.size(3)) == Config::HeadDim, "fp16 path expects fixed d_head");
+    TORCH_CHECK((q.size(2) % Config::BlockM) == 0, "fp16 path expects seq_len divisible by BlockM");
 
     config::ForwardKernelArgs args{};
     args.Q = q.data_ptr();
@@ -103,22 +103,22 @@ void launch_v5_fp16(
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     auto set_attr_err = cudaFuncSetAttribute(
-        forward::flash_attention_forward_v5_mma<Config>,
+        forward::flash_attention_forward_v6_mma<Config>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(smem));
     TORCH_CHECK(
         set_attr_err == cudaSuccess,
-        "Failed to set MaxDynamicSharedMemorySize for v5 kernel: ",
+        "Failed to set MaxDynamicSharedMemorySize for kernel: ",
         cudaGetErrorString(set_attr_err));
     auto carveout_err = cudaFuncSetAttribute(
-        forward::flash_attention_forward_v5_mma<Config>,
+        forward::flash_attention_forward_v6_mma<Config>,
         cudaFuncAttributePreferredSharedMemoryCarveout,
         100);
     TORCH_CHECK(
         carveout_err == cudaSuccess,
-        "Failed to set PreferredSharedMemoryCarveout for v5 kernel: ",
+        "Failed to set PreferredSharedMemoryCarveout for kernel: ",
         cudaGetErrorString(carveout_err));
-    forward::flash_attention_forward_v5_mma<Config><<<grid, block, smem, stream>>>(args);
+    forward::flash_attention_forward_v6_mma<Config><<<grid, block, smem, stream>>>(args);
 }
 
 std::tuple<torch::Tensor, float> fa_forward(
@@ -141,7 +141,7 @@ std::tuple<torch::Tensor, float> fa_forward(
         cudaEventRecord(start, at::cuda::getCurrentCUDAStream().stream());
     }
 
-    launch_v5_fp16(q, k, v, o);
+    launch_fp16(q, k, v, o);
 
     auto err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
