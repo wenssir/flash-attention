@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../config/macros.cuh"
-#include "../tensor_core/accum_layout_traits.cuh"
+#include "../tensor_core/ldmatrix_traits.cuh"
 #include "../tensor_core/fragment.cuh"
 
 namespace loadstore {
@@ -23,7 +23,7 @@ DEVICE auto reg_at(Regs const& regs, int idx) {
 
 template <
     bool StoreLogical = true,
-    typename LayoutTraits = tensor::AccumLayoutTraits<tensor::MmaShapeM16N8K16>,
+    typename LayoutTraits = tensor::RF2SmemLayoutTraits<tensor::MmaShapeM16N8K16>,
     typename TensorS,
     typename Regs>
 DEVICE void copy_r2s(TensorS& smem, Regs const& regs) {
@@ -40,18 +40,11 @@ DEVICE void copy_r2s(TensorS& smem, Regs const& regs) {
     }
 }
 
-template <bool StoreLogical = true, typename LayoutTraits = tensor::AccumLayoutTraits<tensor::MmaShapeM16N8K16>>
+template <bool StoreLogical = true, typename LayoutTraits = tensor::RF2SmemLayoutTraits<tensor::MmaShapeM16N8K16>>
 struct CopyR2SOp {
     template <typename TensorS, typename Regs>
     DEVICE void operator()(TensorS& smem, Regs const& regs) const {
         copy_r2s<StoreLogical, LayoutTraits>(smem, regs);
-    }
-};
-
-struct CopyR2SRawOp {
-    template <typename TensorS, typename Regs>
-    DEVICE void operator()(TensorS& smem, Regs const& regs) const {
-        copy_r2s<true>(smem, regs);
     }
 };
 

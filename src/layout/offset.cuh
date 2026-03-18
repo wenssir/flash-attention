@@ -6,6 +6,21 @@
 
 namespace layout {
 
+template <typename T>
+struct ConstantOffset {
+    [[no_unique_address]] T _value;
+
+    HOST_DEVICE constexpr ConstantOffset(T value = {}) : _value(value) {}
+
+    HOST_DEVICE constexpr auto operator()() const {
+        return _value;
+    }
+
+    HOST_DEVICE constexpr auto value() const {
+        return _value;
+    }
+};
+
 template <typename Shape, typename Stride>
 struct Offset {
     [[no_unique_address]] Shape _shape;
@@ -30,6 +45,11 @@ struct Offset {
 template <typename Shape, typename Stride>
 HOST_DEVICE constexpr auto make_offset(Shape s, Stride d) {
     return Offset<Shape, Stride>(s, d);
+}
+
+template <typename T>
+HOST_DEVICE constexpr auto make_offset(T value) {
+    return ConstantOffset<T>(value);
 }
 
 template <typename ShapeA, typename StrideA, typename ShapeB, typename StrideB, typename Stride>

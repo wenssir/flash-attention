@@ -23,15 +23,28 @@ struct Tensor{
     HOST_DEVICE constexpr Tensor(Engine d, Layout l) : _data(d), _layout(l) {}
 
     template <typename... Coords>
-    DEVICE constexpr auto& operator()(Coords... c) {
-        auto offset = _layout(c...);
-        return _data[offset];
+    DEVICE constexpr decltype(auto) operator()(Coords... c) {
+        auto result = _layout(c...);
+        if constexpr (layout::has_underscore<decltype(cxx::make_tuple(c...))>::value) {
+            return Tensor<Engine, decltype(result)>(_data, result);
+        } else {
+            return _data[result];
+        }
     }
 
     template <typename... Coords>
-    DEVICE constexpr auto const& operator()(Coords... c) const {
-        auto offset = _layout(c...);
-        return _data[offset];
+    DEVICE constexpr decltype(auto) operator()(Coords... c) const {
+        auto result = _layout(c...);
+        if constexpr (layout::has_underscore<decltype(cxx::make_tuple(c...))>::value) {
+            return Tensor<Engine, decltype(result)>(_data, result);
+        } else {
+            return _data[result];
+        }
+    }
+
+    template <typename... Coords>
+    HOST_DEVICE constexpr auto offset(Coords... c) const {
+        return _layout(c...);
     }
 
     HOST_DEVICE constexpr auto shape() const { return _layout.shape(); }
@@ -51,26 +64,6 @@ struct Tensor{
         printf("  Size: %zu\n", static_cast<size_t>(_layout.size()));
     }
 
-    // Print first N elements
-    HOST void print_elements(int max_elements = 10) const {
-        print();
-        printf("  Data (first %d elements): ", max_elements);
-        int n = static_cast<int>(_layout.size());
-        if (n > max_elements) n = max_elements;
-        for (int i = 0; i < n; ++i) {
-            if constexpr (std::is_same_v<std::remove_pointer_t<Engine>, float>) {
-                printf("%.2f ", static_cast<float>(_data[i]));
-            } else if constexpr (std::is_same_v<std::remove_pointer_t<Engine>, int>) {
-                printf("%d ", static_cast<int>(_data[i]));
-            } else {
-                printf("%p ", static_cast<void*>(_data[i]));
-            }
-        }
-        if (static_cast<int>(_layout.size()) > max_elements) {
-            printf("... (%zu more)", static_cast<size_t>(_layout.size() - max_elements));
-        }
-        printf("\n");
-    }
 };
 
 template <typename Ptr, typename Layout>
@@ -87,15 +80,20 @@ template <typename TensorType, typename LayoutType, typename Coord>
 HOST_DEVICE constexpr auto local_tile(TensorType && tensor, LayoutType sub_layout, Coord coord) {
     auto sub_shape = sub_layout.shape();
     auto layout = tensor.layout();
-    auto tensor_stride = layout.stride();
-    auto offset = layout::make_offset(container::tuple_scale(coord, sub_shape), tensor_stride);
+    auto base_coord = container::tuple_scale(coord, sub_shape);
     if constexpr (layout::is_composed_layout_v<decltype(layout)>) {
-        auto tensor_offset = layout.offset();
-        offset = layout::add_offset(offset, tensor_offset, tensor_stride);
-        auto new_composed_layout = layout::ComposedLayout(layout.outer(), offset, layout::make_layout(sub_shape, tensor_stride));
+        auto base_offset = layout.inner()(base_coord);
+        auto new_composed_layout = layout::ComposedLayout(
+            layout.outer(),
+            layout::make_offset(base_offset),
+            sub_layout);
         return tensor::Tensor(tensor.data_ptr(), new_composed_layout);
     } else {
-        auto new_composed_layout = layout::ComposedLayout(NoSwizzle(), offset, layout::make_layout(sub_shape, tensor_stride));
+        auto base_offset = layout(base_coord);
+        auto new_composed_layout = layout::ComposedLayout(
+            NoSwizzle(),
+            layout::make_offset(base_offset),
+            sub_layout);
         return tensor::Tensor(tensor.data_ptr(), new_composed_layout);
     }
 }

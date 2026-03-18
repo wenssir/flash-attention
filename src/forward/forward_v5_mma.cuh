@@ -53,10 +53,10 @@ DEVICE void gemm_qk(
         scores[out_tile].clear();
         #pragma unroll
         for (int k_tile = 0; k_tile < KernelConfig::QkKSteps; ++k_tile) {
-            auto q_sub = tensor::local_tile(sQ, KernelConfig::q_sub_layout, layout::make_coordinate(warp, k_tile));
-            auto k_sub = tensor::local_tile(sK, KernelConfig::k_sub_layout, layout::make_coordinate(out_tile, k_tile));
-            loadstore::load_fragment<KernelConfig>(q_frag, q_sub);
-            loadstore::load_fragment<KernelConfig>(k_frag, k_sub);
+            auto q_frag_view = loadstore::partition_fragment_A<KernelConfig>(sQ, warp, k_tile);
+            auto k_frag_view = loadstore::partition_fragment_B<KernelConfig>(sK, out_tile, k_tile);
+            loadstore::load_fragment<KernelConfig>(q_frag, q_frag_view);
+            loadstore::load_fragment<KernelConfig>(k_frag, k_frag_view);
             KernelConfig::Atom::fma(q_frag, k_frag, scores[out_tile]);
         }
     }
@@ -74,12 +74,12 @@ DEVICE void gemm_pv(
     for (int out_tile = 0; out_tile < KernelConfig::OutputTiles; ++out_tile) {
         #pragma unroll
         for (int k_tile = 0; k_tile < KernelConfig::PvKTiles; ++k_tile) {
+            auto v_frag_view = loadstore::partition_fragment_V<KernelConfig>(sV, k_tile, out_tile);
             convert_scores_pair_to_p_frag<KernelConfig>(
                 p_frag,
                 scores[2 * k_tile + 0],
                 scores[2 * k_tile + 1]);
-            auto v_sub = tensor::local_tile(sV, KernelConfig::v_sub_layout, layout::make_coordinate(k_tile, out_tile));
-            loadstore::load_fragment<KernelConfig>(v_frag, v_sub);
+            loadstore::load_fragment<KernelConfig>(v_frag, v_frag_view);
             KernelConfig::Atom::fma(p_frag, v_frag, acc_o[out_tile]);
         }
     }
@@ -90,34 +90,58 @@ DEVICE void process_kv_block(
     TensorQ& sQ,
     TensorK& sK,
     TensorV& sV,
+    typename KernelConfig::Element* K,
+    typename KernelConfig::Element* V,
+    typename KernelConfig::index_t k_base,
+    typename KernelConfig::index_t v_base,
     typename KernelConfig::FragAcc (&scores)[KernelConfig::ScoreTiles],
     typename KernelConfig::FragAcc* acc_o,
-    float* softmax_m,
-    float* softmax_l,
+    float& softmax_m0,
+    float& softmax_l0,
+    float& softmax_m1,
+    float& softmax_l1,
     float softmax_scale_log2e,
     int warp,
     int lane,
     int q_block_idx,
     int kv_block_idx,
+    int n_kv_tiles,
     int seq_len,
-    bool causal
+    bool causal,
+    int stride_seq_k,
+    int stride_seq_v
 ) {
-    (void)IsFirst;
+    if constexpr (IsFirst) {
+        loadstore::wait_group<0>();
+        __syncthreads();
+    }
+
+    loadstore::load_v_async<KernelConfig>(sV, V, v_base, kv_block_idx, seq_len, stride_seq_v);
+    loadstore::commit_group();
+
     gemm_qk<KernelConfig>(scores, sQ, sK, warp);
+
+    loadstore::wait_group<0>();
+    __syncthreads();
 
     float row0_max = -INFINITY;
     float row1_max = -INFINITY;
-    softmax::mask_and_reduce_scores<KernelConfig>(
-        scores, row0_max, row1_max, warp, lane, q_block_idx, kv_block_idx, seq_len, causal);
+    softmax::calc_row_max<KernelConfig>(
+        scores, row0_max, row1_max, softmax_m0, softmax_m1,
+        warp, lane, q_block_idx, kv_block_idx, seq_len, causal);
     softmax::online_softmax_update_scores<KernelConfig>(
-        scores, acc_o, row0_max, row1_max, softmax_m, softmax_l,
-        softmax_scale_log2e, warp, lane, kv_block_idx);
+        scores, acc_o, row0_max, row1_max, softmax_m0, softmax_l0, softmax_m1, softmax_l1,
+        softmax_scale_log2e, kv_block_idx);
 
+    if (kv_block_idx + 1 < n_kv_tiles) {
+        loadstore::load_k_async<KernelConfig>(sK, K, k_base, kv_block_idx + 1, seq_len, stride_seq_k);
+        loadstore::commit_group();
+    }
     gemm_pv<KernelConfig>(acc_o, scores, sV);
 }
 
 template <typename KernelConfig>
-__global__ void flash_attention_forward_v4_mma(const config::ForwardKernelArgs args) {
+__global__ void flash_attention_forward_v5_mma(const config::ForwardKernelArgs args) {
     using Element = typename KernelConfig::Element;
     using index_t = typename KernelConfig::index_t;
 
@@ -130,14 +154,12 @@ __global__ void flash_attention_forward_v4_mma(const config::ForwardKernelArgs a
         return;
     }
 
-    extern __shared__ char smem_raw[];
+    extern __shared__ __align__(16) unsigned char smem_raw[];
     Element* smem_ptr = reinterpret_cast<Element*>(smem_raw);
 
     auto sQ = tensor::make_tensor(smem_ptr, typename KernelConfig::SmemLayoutQ{});
     auto sK = tensor::make_tensor(sQ.data_ptr() + sQ.size(), typename KernelConfig::SmemLayoutKV{});
     auto sV = tensor::make_tensor(sK.data_ptr() + sK.size(), typename KernelConfig::SmemLayoutKV{});
-    float* softmax_m = reinterpret_cast<float*>(sV.data_ptr() + sV.size());
-    float* softmax_l = softmax_m + KernelConfig::NWarps * KernelConfig::MmaM;
 
     auto* Q = static_cast<typename KernelConfig::Element*>(args.Q);
     auto* K = static_cast<typename KernelConfig::Element*>(args.K);
@@ -149,22 +171,7 @@ __global__ void flash_attention_forward_v4_mma(const config::ForwardKernelArgs a
     index_t v_base = static_cast<index_t>(batch_idx) * args.stride_batch_v + static_cast<index_t>(head_idx) * args.stride_head_v;
     index_t o_base = static_cast<index_t>(batch_idx) * args.stride_batch_o + static_cast<index_t>(head_idx) * args.stride_head_o;
 
-    auto gq_layout = layout::make_layout(
-        layout::make_shape(numeric::Int<KernelConfig::BlockM>{}, numeric::Int<KernelConfig::HeadDim>{}),
-        layout::make_stride(args.stride_seq_q, 1));
-    auto gk_layout = layout::make_layout(
-        layout::make_shape(numeric::Int<KernelConfig::BlockN>{}, numeric::Int<KernelConfig::HeadDim>{}),
-        layout::make_stride(args.stride_seq_k, 1));
-    auto gv_layout = layout::make_layout(
-        layout::make_shape(numeric::Int<KernelConfig::BlockN>{}, numeric::Int<KernelConfig::HeadDim>{}),
-        layout::make_stride(args.stride_seq_v, 1));
-
-    auto gQTile = tensor::make_tensor(
-        Q + q_base + static_cast<index_t>(q_block_idx * KernelConfig::BlockM) * args.stride_seq_q,
-        gq_layout);
-    int valid_q_rows = max(0, min(KernelConfig::BlockM, args.seq_len - q_block_idx * KernelConfig::BlockM));
-    loadstore::load_q<KernelConfig>(sQ, gQTile, valid_q_rows);
-    __syncthreads();
+    loadstore::load_q_async<KernelConfig>(sQ, Q, q_base, q_block_idx, args.seq_len, args.stride_seq_q);
 
     typename KernelConfig::FragAcc acc_o[KernelConfig::OutputTiles];
     #pragma unroll
@@ -173,11 +180,13 @@ __global__ void flash_attention_forward_v4_mma(const config::ForwardKernelArgs a
     }
 
     int lane = threadIdx.x & 31;
-    if (lane < KernelConfig::MmaM) {
-        softmax_m[warp * KernelConfig::MmaM + lane] = -INFINITY;
-        softmax_l[warp * KernelConfig::MmaM + lane] = 0.0f;
-    }
-    __syncthreads();
+    int row0 = 0;
+    int row1 = 0;
+    softmax::lane_rows(lane, row0, row1);
+    float softmax_m0 = -INFINITY;
+    float softmax_l0 = 0.0f;
+    float softmax_m1 = -INFINITY;
+    float softmax_l1 = 0.0f;
 
     const float softmax_scale_log2e = args.softmax_scale * KernelConfig::Log2e;
     int n_kv_tiles = (args.seq_len + KernelConfig::BlockN - 1) / KernelConfig::BlockN;
@@ -185,28 +194,26 @@ __global__ void flash_attention_forward_v4_mma(const config::ForwardKernelArgs a
     typename KernelConfig::FragAcc scores[KernelConfig::ScoreTiles];
 
     if (n_kv_tiles > 0) {
-        int kv_block_idx = 0;
-        loadstore::load_k<KernelConfig>(sK, K, k_base, gk_layout, kv_block_idx, args.seq_len, args.stride_seq_k);
-        loadstore::load_v<KernelConfig>(sV, V, v_base, gv_layout, kv_block_idx, args.seq_len, args.stride_seq_v);
-        __syncthreads();
+        loadstore::load_k_async<KernelConfig>(sK, K, k_base, 0, args.seq_len, args.stride_seq_k);
+        loadstore::commit_group();
         process_kv_block<true, KernelConfig>(
-            sQ, sK, sV, scores, acc_o,
-            softmax_m, softmax_l, softmax_scale_log2e, warp, lane,
-            q_block_idx, kv_block_idx, args.seq_len, args.causal != 0);
+            sQ, sK, sV, K, V, k_base, v_base, scores, acc_o,
+            softmax_m0, softmax_l0, softmax_m1, softmax_l1, softmax_scale_log2e, warp, lane,
+            q_block_idx, 0, n_kv_tiles, args.seq_len, args.causal != 0,
+            args.stride_seq_k, args.stride_seq_v);
     }
 
     for (int kv_block_idx = 1; kv_block_idx < n_kv_tiles; ++kv_block_idx) {
-        loadstore::load_k<KernelConfig>(sK, K, k_base, gk_layout, kv_block_idx, args.seq_len, args.stride_seq_k);
-        loadstore::load_v<KernelConfig>(sV, V, v_base, gv_layout, kv_block_idx, args.seq_len, args.stride_seq_v);
-        __syncthreads();
         process_kv_block<false, KernelConfig>(
-            sQ, sK, sV, scores, acc_o,
-            softmax_m, softmax_l, softmax_scale_log2e, warp, lane,
-            q_block_idx, kv_block_idx, args.seq_len, args.causal != 0);
+            sQ, sK, sV, K, V, k_base, v_base, scores, acc_o,
+            softmax_m0, softmax_l0, softmax_m1, softmax_l1, softmax_scale_log2e, warp, lane,
+            q_block_idx, kv_block_idx, n_kv_tiles, args.seq_len, args.causal != 0,
+            args.stride_seq_k, args.stride_seq_v);
     }
 
     float* smem_o = reinterpret_cast<float*>(sK.data_ptr());
-    softmax::finalize_output<KernelConfig>(acc_o, softmax_l, smem_o, O, o_base, args.stride_seq_o, args.seq_len, q_block_idx, warp, lane);
+    softmax::finalize_output<KernelConfig>(
+        acc_o, softmax_l0, softmax_l1, smem_o, O, o_base, args.stride_seq_o, args.seq_len, q_block_idx, warp, lane);
 }
 
 } // namespace forward

@@ -9,30 +9,12 @@
 #include <tuple>
 
 #include "../../src/config/config.cuh"
-#include "../../src/forward/forward_v2_float4_double_buffer_prefetch.h"
-#include "../../src/forward/forward_v4_mma.cuh"
+#include "../../src/utils/util_func.cuh"
+#include "../../src/forward/forward_v5_mma.cuh"
 
 namespace py = pybind11;
 
 namespace {
-
-constexpr int kBlockSize = 128;
-constexpr int kWarpSize = 32;
-
-template <int HeadDim>
-struct KernelTile;
-
-template <>
-struct KernelTile<64> {
-    static constexpr int BlockM = 32;
-    static constexpr int BlockN = 32;
-};
-
-template <>
-struct KernelTile<128> {
-    static constexpr int BlockM = 16;
-    static constexpr int BlockN = 16;
-};
 
 inline void check_cuda_tensor(const torch::Tensor& t, const char* name) {
     TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor");
@@ -61,19 +43,11 @@ inline void validate_inputs(
     TORCH_CHECK(q.dtype() == v.dtype(), "q and v must have the same dtype");
 
     const auto d = q.size(3);
-    TORCH_CHECK(d == 64 || d == 128, "Only head_dim 64 or 128 is supported");
+    TORCH_CHECK(d == config::ForwardConfig::HeadDim, "Only head_dim 128 is supported");
 
     const auto n = q.size(2);
-    if (q.dtype() == torch::kFloat16) {
-        TORCH_CHECK(d == 128, "fp16 path currently supports d_head=128 only");
-        TORCH_CHECK((n % config::ForwardConfig::BlockM) == 0, "fp16 path requires seq_len divisible by BlockM");
-    } else {
-        if (d == 64) {
-            TORCH_CHECK((n % KernelTile<64>::BlockM) == 0, "seq_len must be divisible by 32 for d=64");
-        } else if (d == 128) {
-            TORCH_CHECK((n % KernelTile<128>::BlockM) == 0, "seq_len must be divisible by 16 for d=128");
-        }
-    }
+    TORCH_CHECK(q.dtype() == torch::kFloat16, "pybind path currently supports fp16 only");
+    TORCH_CHECK((n % config::ForwardConfig::BlockM) == 0, "fp16 path requires seq_len divisible by BlockM");
 
     if (o_opt.has_value()) {
         check_cuda_tensor(o_opt.value(), "o");
@@ -82,51 +56,7 @@ inline void validate_inputs(
     }
 }
 
-template <int HeadDim>
-void launch_kernel(
-    const torch::Tensor& q,
-    const torch::Tensor& k,
-    const torch::Tensor& v,
-    torch::Tensor& o
-) {
-    const int B = static_cast<int>(q.size(0));
-    const int H = static_cast<int>(q.size(1));
-    const int N = static_cast<int>(q.size(2));
-
-    const int q_stride_b = static_cast<int>(q.stride(0));
-    const int q_stride_h = static_cast<int>(q.stride(1));
-    const int q_stride_n = static_cast<int>(q.stride(2));
-    const int k_stride_b = static_cast<int>(k.stride(0));
-    const int k_stride_h = static_cast<int>(k.stride(1));
-    const int k_stride_n = static_cast<int>(k.stride(2));
-    const int v_stride_b = static_cast<int>(v.stride(0));
-    const int v_stride_h = static_cast<int>(v.stride(1));
-    const int v_stride_n = static_cast<int>(v.stride(2));
-    const int o_stride_b = static_cast<int>(o.stride(0));
-    const int o_stride_h = static_cast<int>(o.stride(1));
-    const int o_stride_n = static_cast<int>(o.stride(2));
-
-    constexpr int kBlockM = KernelTile<HeadDim>::BlockM;
-    constexpr int kBlockN = KernelTile<HeadDim>::BlockN;
-    dim3 grid_dim((N + kBlockM - 1) / kBlockM, H, B);
-    dim3 block_dim(kBlockSize);
-
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
-    flash_attention_forward_v2_tile_and_prefetch<kBlockM, kBlockN, HeadDim, kBlockSize, kWarpSize>
-        <<<grid_dim, block_dim, 0, stream>>>(
-            q.data_ptr<float>(),
-            k.data_ptr<float>(),
-            v.data_ptr<float>(),
-            o.data_ptr<float>(),
-            N, B, H,
-            q_stride_b, q_stride_h, q_stride_n,
-            k_stride_b, k_stride_h, k_stride_n,
-            v_stride_b, v_stride_h, v_stride_n,
-            o_stride_b, o_stride_h, o_stride_n
-        );
-}
-
-void launch_v4_fp16(
+void launch_v5_fp16(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
@@ -134,9 +64,9 @@ void launch_v4_fp16(
 ) {
     using Config = config::ForwardConfig;
 
-    TORCH_CHECK(q.dtype() == torch::kFloat16, "v4 fp16 path expects fp16 input");
-    TORCH_CHECK(static_cast<int>(q.size(3)) == Config::HeadDim, "v4 fp16 path expects fixed d_head");
-    TORCH_CHECK((q.size(2) % Config::BlockM) == 0, "v4 fp16 path expects seq_len divisible by BlockM");
+    TORCH_CHECK(q.dtype() == torch::kFloat16, "v5 fp16 path expects fp16 input");
+    TORCH_CHECK(static_cast<int>(q.size(3)) == Config::HeadDim, "v5 fp16 path expects fixed d_head");
+    TORCH_CHECK((q.size(2) % Config::BlockM) == 0, "v5 fp16 path expects seq_len divisible by BlockM");
 
     config::ForwardKernelArgs args{};
     args.Q = q.data_ptr();
@@ -169,18 +99,26 @@ void launch_v4_fp16(
         static_cast<unsigned int>(q.size(0))
     );
     dim3 block(Config::NThreads);
-    size_t smem = static_cast<size_t>(forward::forward_v4_smem_bytes<Config>());
+    size_t smem = static_cast<size_t>(forward::forward_smem_bytes<Config>());
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     auto set_attr_err = cudaFuncSetAttribute(
-        forward::flash_attention_forward_v4_mma<Config>,
+        forward::flash_attention_forward_v5_mma<Config>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(smem));
     TORCH_CHECK(
         set_attr_err == cudaSuccess,
-        "Failed to set MaxDynamicSharedMemorySize for v4 kernel: ",
+        "Failed to set MaxDynamicSharedMemorySize for v5 kernel: ",
         cudaGetErrorString(set_attr_err));
-    forward::flash_attention_forward_v4_mma<Config><<<grid, block, smem, stream>>>(args);
+    auto carveout_err = cudaFuncSetAttribute(
+        forward::flash_attention_forward_v5_mma<Config>,
+        cudaFuncAttributePreferredSharedMemoryCarveout,
+        100);
+    TORCH_CHECK(
+        carveout_err == cudaSuccess,
+        "Failed to set PreferredSharedMemoryCarveout for v5 kernel: ",
+        cudaGetErrorString(carveout_err));
+    forward::flash_attention_forward_v5_mma<Config><<<grid, block, smem, stream>>>(args);
 }
 
 std::tuple<torch::Tensor, float> fa_forward(
@@ -192,7 +130,6 @@ std::tuple<torch::Tensor, float> fa_forward(
 ) {
     validate_inputs(q, k, v, o_opt);
 
-    auto in_dtype = q.dtype();
     torch::Tensor o = o_opt.has_value() ? o_opt.value() : torch::empty_like(q);
     float runtime_ms = 0.0f;
 
@@ -204,18 +141,7 @@ std::tuple<torch::Tensor, float> fa_forward(
         cudaEventRecord(start, at::cuda::getCurrentCUDAStream().stream());
     }
 
-    if (in_dtype == torch::kFloat16) {
-        launch_v4_fp16(q, k, v, o);
-    } else {
-        const int d = static_cast<int>(q.size(3));
-        if (d == 64) {
-            launch_kernel<64>(q, k, v, o);
-        } else if (d == 128) {
-            launch_kernel<128>(q, k, v, o);
-        } else {
-            TORCH_CHECK(false, "Unsupported head_dim: ", d);
-        }
-    }
+    launch_v5_fp16(q, k, v, o);
 
     auto err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));

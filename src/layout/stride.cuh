@@ -18,6 +18,9 @@ template <class Shape, class Stride, class Coord>
 HOST_DEVICE constexpr auto coord_to_idx(Shape const& shape, Stride const& stride, Coord const& coord) {
     if constexpr (container::is_tuple_v<Stride> && container::is_tuple_v<Coord>) {
         return container::dot_product(coord, stride);
+    } else if constexpr (container::is_tuple_v<Stride> && !container::is_tuple_v<Coord>) {
+        static_assert(cxx::tuple_size_v<Stride> == 1, "Scalar coordinate only supports rank-1 tuple stride");
+        return coord_to_idx(shape, cxx::get<0>(stride), coord);
     } else {
         return stride * coord;
     }

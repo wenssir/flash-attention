@@ -47,7 +47,7 @@ __global__ void copy_s2g_kernel(float* gmem, float const* smem_like) {
     op(g_tensor, s_tensor);
 }
 
-using FragA = tensor::Fragment<__half, loadstore::LdmatrixHelperQ<__half>, 16, 16>;
+using FragA = tensor::Fragment<__half, tensor::LdmatrixHelperQ<__half>, 16, 16>;
 
 __global__ void copy_s2r_kernel(uint32_t* out_regs, __half* smem_src) {
     auto l = layout::make_layout(

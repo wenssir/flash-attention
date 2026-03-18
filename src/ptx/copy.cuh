@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cassert>
+
 #include "../config/macros.cuh"
 #include "../numeric/Int.cuh"
 
@@ -16,8 +18,8 @@ struct CP_ASYNC_CACHE_ALWAYS {
 
     HOST_DEVICE static void copy(TS const& src, TD& dst) {
 #if defined(CUDA_ARCH_SM80)
-        TS const* gmem_ptr    = &gmem_src;
-        uint32_t smem_int_ptr = __cvta_generic_to_shared(dst);
+        TS const* gmem_ptr    = &src;
+        uint32_t smem_int_ptr = __cvta_generic_to_shared(&dst);
         asm volatile(
             "cp.async.ca.shared.global.L2::128B [%0], [%1], %2; "
             :: "r"(smem_int_ptr),
@@ -39,7 +41,7 @@ struct CP_ASYNC_CACHE_GLOBAL {
     HOST_DEVICE static void copy(TS const& src, TD& dst) {
 #if defined(CUDA_ARCH_SM80)
         TS const* gmem_ptr    = &src;
-        uint32_t smem_int_ptr = __cvta_generic_to_shared(dst);
+        uint32_t smem_int_ptr = __cvta_generic_to_shared(&dst);
         asm volatile(
             "cp.async.cg.shared.global.L2::128B [%0], [%1], %2; "
             :: "r"(smem_int_ptr),

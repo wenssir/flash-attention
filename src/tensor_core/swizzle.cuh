@@ -28,7 +28,8 @@ struct Swizzle {
 };
 
 struct NoSwizzle {
-    HOST_DEVICE constexpr auto operator()(int const& offset) const { return offset; }
+    template <typename T>
+    HOST_DEVICE constexpr auto operator()(T const& offset) const { return offset; }
 };
 
 }

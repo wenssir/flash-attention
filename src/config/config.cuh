@@ -65,14 +65,10 @@ struct FlashFwdKernelConfig : public Base {
     using index_t = typename Base::index_t;
     using Atom = ptx::Sm80MmaF16F16F32M16N8K16;
     using FragAcc = tensor::AccumFragment<float, 4>;
-    using FragQ = tensor::Fragment<Element, loadstore::LdmatrixHelperQ<Element>, 16, 16>;
+    using FragQ = tensor::Fragment<Element, tensor::LdmatrixHelperQ<Element>, 16, 16>;
     using FragP = FragQ;
-    using FragK = tensor::Fragment<
-        Element,
-        loadstore::LdmatrixHelper<ptx::LDMATRIX_X2_TRANS<Element>, 8, 16, true>,
-        8,
-        16>;
-    using FragV = tensor::Fragment<Element, loadstore::LdmatrixHelperK<Element>, 16, 8>;
+    using FragK = tensor::Fragment<Element, tensor::LdmatrixHelperK<Element>, 16, 8>;
+    using FragV = tensor::Fragment<Element, tensor::LdmatrixHelperK<Element>, 16, 8>;
 
     static constexpr bool Has_cp_async = Base::Has_cp_async;
 
@@ -96,6 +92,8 @@ struct FlashFwdKernelConfig : public Base {
     static constexpr int thread_k = 8;
     static constexpr int copy_k = 8;
     static constexpr bool UseSmemSwizzle = true;
+    static constexpr int SmemAtomRows = 8;
+    static constexpr int SmemAtomCols = 64;
     static constexpr int QkKSteps = HeadDim / MmaK;
     static constexpr int ScoreTiles = BlockN / MmaN;
     static constexpr int PvKTiles = BlockN / MmaK;
@@ -106,6 +104,9 @@ struct FlashFwdKernelConfig : public Base {
     static_assert((HeadDim % MmaK) == 0, "HeadDim must be divisible by 16");
     static_assert((BlockN % MmaN) == 0, "BlockN must be divisible by 8");
     static_assert((BlockN % MmaK) == 0, "v4 PV path requires BlockN divisible by 16");
+    static_assert((BlockM % SmemAtomRows) == 0, "BlockM must be divisible by 8 for tiled smem layout");
+    static_assert((BlockN % SmemAtomRows) == 0, "BlockN must be divisible by 8 for tiled smem layout");
+    static_assert((HeadDim % SmemAtomCols) == 0, "HeadDim must be divisible by 64 for tiled smem layout");
 
     static constexpr auto warp_tile_shape =
         layout::make_shape(numeric::Int<16>{}, numeric::Int<128>{});
@@ -142,8 +143,45 @@ struct FlashFwdKernelConfig : public Base {
             layout::make_shape(numeric::Int<BLOCKN>{}, numeric::Int<HEADDIM>{}),
             layout::make_stride(numeric::Int<HEADDIM>{}, numeric::Int<1>{}))));
 
-    using SmemLayoutQ = std::conditional_t<UseSmemSwizzle, SmemLayoutQSwizzle, SmemLayoutQNoSwizzle>;
-    using SmemLayoutKV = std::conditional_t<UseSmemSwizzle, SmemLayoutKVSwizzle, SmemLayoutKVNoSwizzle>;
+    using SmemLayoutQAtomNoSwizzle = decltype(layout::composition(
+        tensor::NoSwizzle{},
+        layout::make_layout(
+            layout::make_shape(numeric::Int<SmemAtomRows>{}, numeric::Int<SmemAtomCols>{}),
+            layout::make_stride(numeric::Int<SmemAtomCols>{}, numeric::Int<1>{}))));
+    using SmemLayoutQAtomSwizzle = decltype(layout::composition(
+        tensor::Swizzle<3, 3, 3>{},
+        layout::make_layout(
+            layout::make_shape(numeric::Int<SmemAtomRows>{}, numeric::Int<SmemAtomCols>{}),
+            layout::make_stride(numeric::Int<SmemAtomCols>{}, numeric::Int<1>{}))));
+    using SmemLayoutKVAtomNoSwizzle = decltype(layout::composition(
+        tensor::NoSwizzle{},
+        layout::make_layout(
+            layout::make_shape(numeric::Int<SmemAtomRows>{}, numeric::Int<SmemAtomCols>{}),
+            layout::make_stride(numeric::Int<SmemAtomCols>{}, numeric::Int<1>{}))));
+    using SmemLayoutKVAtomSwizzle = decltype(layout::composition(
+        tensor::Swizzle<3, 3, 3>{},
+        layout::make_layout(
+            layout::make_shape(numeric::Int<SmemAtomRows>{}, numeric::Int<SmemAtomCols>{}),
+            layout::make_stride(numeric::Int<SmemAtomCols>{}, numeric::Int<1>{}))));
+
+    using SmemLayoutQTileGrid = decltype(layout::make_ordered_layout(
+        layout::make_shape(numeric::Int<BLOCKM / SmemAtomRows>{},
+                           numeric::Int<HEADDIM / SmemAtomCols>{})));
+    using SmemLayoutKVTileGrid = decltype(layout::make_ordered_layout(
+        layout::make_shape(numeric::Int<BLOCKN / SmemAtomRows>{},
+                           numeric::Int<HEADDIM / SmemAtomCols>{})));
+
+    using SmemLayoutQTiledNoSwizzle =
+        decltype(layout::tile_to_shape(SmemLayoutQAtomNoSwizzle{}, layout::make_shape(numeric::Int<BLOCKM>{}, numeric::Int<HEADDIM>{})));
+    using SmemLayoutQTiledSwizzle =
+        decltype(layout::tile_to_shape(SmemLayoutQAtomSwizzle{}, layout::make_shape(numeric::Int<BLOCKM>{}, numeric::Int<HEADDIM>{})));
+    using SmemLayoutKVTiledNoSwizzle =
+        decltype(layout::tile_to_shape(SmemLayoutKVAtomNoSwizzle{}, layout::make_shape(numeric::Int<BLOCKN>{}, numeric::Int<HEADDIM>{})));
+    using SmemLayoutKVTiledSwizzle =
+        decltype(layout::tile_to_shape(SmemLayoutKVAtomSwizzle{}, layout::make_shape(numeric::Int<BLOCKN>{}, numeric::Int<HEADDIM>{})));
+
+    using SmemLayoutQ = std::conditional_t<UseSmemSwizzle, SmemLayoutQTiledSwizzle, SmemLayoutQTiledNoSwizzle>;
+    using SmemLayoutKV = std::conditional_t<UseSmemSwizzle, SmemLayoutKVTiledSwizzle, SmemLayoutKVTiledNoSwizzle>;
     using QSubLayout = decltype(layout::make_layout(
         layout::make_shape(numeric::Int<MmaM>{}, numeric::Int<MmaK>{}),
         layout::make_stride(numeric::Int<HeadDim>{}, numeric::Int<1>{})));

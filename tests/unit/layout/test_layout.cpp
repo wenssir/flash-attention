@@ -250,6 +250,187 @@ TEST(LayoutTest, Operator_2D_ColumnMajor_CornerCases) {
     EXPECT_EQ(l(make_coordinate(Int<2>{}, Int<3>{})), 11);
 }
 
+TEST(LayoutTest, HasUnderscore) {
+    static_assert(has_underscore<Underscore>::value);
+    static_assert(has_underscore<decltype(make_coordinate(Int<1>{}, _, Int<2>{}))>::value);
+    static_assert(!has_underscore<decltype(make_coordinate(Int<1>{}, Int<2>{}))>::value);
+}
+
+TEST(LayoutTest, SliceRowMajorKeepColumn) {
+    auto shape = make_shape(Int<3>{}, Int<4>{});
+    auto stride = make_stride(Int<4>{}, Int<1>{});
+    Layout l(shape, stride);
+
+    auto col_view = l(make_coordinate(Int<1>{}, _));
+
+    EXPECT_EQ(col_view.size(), 4);
+    EXPECT_EQ(col_view(Int<0>{}), 4);
+    EXPECT_EQ(col_view(Int<2>{}), 6);
+    EXPECT_EQ(col_view(Int<3>{}), 7);
+}
+
+TEST(LayoutTest, SliceRowMajorKeepRow) {
+    auto shape = make_shape(Int<3>{}, Int<4>{});
+    auto stride = make_stride(Int<4>{}, Int<1>{});
+    Layout l(shape, stride);
+
+    auto row_view = l(make_coordinate(_, Int<2>{}));
+
+    EXPECT_EQ(row_view.size(), 3);
+    EXPECT_EQ(row_view(Int<0>{}), 2);
+    EXPECT_EQ(row_view(Int<1>{}), 6);
+    EXPECT_EQ(row_view(Int<2>{}), 10);
+}
+
+TEST(LayoutTest, SliceRowMajorKeepAllDims) {
+    auto shape = make_shape(Int<3>{}, Int<4>{});
+    auto stride = make_stride(Int<4>{}, Int<1>{});
+    Layout l(shape, stride);
+
+    auto full_view = l(make_coordinate(_, _));
+
+    EXPECT_EQ(full_view.size(), 12);
+    EXPECT_EQ(full_view(make_coordinate(Int<0>{}, Int<0>{})), 0);
+    EXPECT_EQ(full_view(make_coordinate(Int<1>{}, Int<2>{})), 6);
+    EXPECT_EQ(full_view(make_coordinate(Int<2>{}, Int<3>{})), 11);
+}
+
+TEST(LayoutTest, Slice3DKeepMiddleDim) {
+    auto shape = make_shape(Int<2>{}, Int<3>{}, Int<4>{});
+    auto stride = make_stride(Int<12>{}, Int<4>{}, Int<1>{});
+    Layout l(shape, stride);
+
+    auto mid_view = l(make_coordinate(Int<1>{}, _, Int<2>{}));
+
+    EXPECT_EQ(mid_view.size(), 3);
+    EXPECT_EQ(mid_view(Int<0>{}), 14);
+    EXPECT_EQ(mid_view(Int<1>{}), 18);
+    EXPECT_EQ(mid_view(Int<2>{}), 22);
+}
+
+TEST(LayoutTest, SliceRank1) {
+    auto shape = make_shape(Int<8>{});
+    auto stride = make_stride(Int<1>{});
+    Layout l(shape, stride);
+
+    auto view = l(make_coordinate(_));
+
+    EXPECT_EQ(view.size(), 8);
+    EXPECT_EQ(view(Int<0>{}), 0);
+    EXPECT_EQ(view(Int<5>{}), 5);
+}
+
+namespace {
+
+constexpr int kKPageRows = 8;
+constexpr int kKPageCols = 64;
+constexpr int kKHeadDim = 128;
+
+constexpr int ref_k_tiled_offset(int row, int col) {
+    int page_row = row / kKPageRows;
+    int page_col = col / kKPageCols;
+    int inner_row = row % kKPageRows;
+    int inner_col = col % kKPageCols;
+    int pages_per_row = kKHeadDim / kKPageCols;
+    return (page_row * pages_per_row + page_col) * (kKPageRows * kKPageCols)
+         + inner_row * kKPageCols
+         + inner_col;
+}
+
+constexpr int bank_for_half_offset(int half_offset) {
+    return (half_offset / 2) % 32;
+}
+
+} // namespace
+
+TEST(LayoutTest, KTilePagedOffset8x64ForHeadDim128) {
+    EXPECT_EQ(ref_k_tiled_offset(0, 0), 0);
+    EXPECT_EQ(ref_k_tiled_offset(0, 63), 63);
+    EXPECT_EQ(ref_k_tiled_offset(0, 64), 512);
+    EXPECT_EQ(ref_k_tiled_offset(7, 63), 7 * 64 + 63);
+    EXPECT_EQ(ref_k_tiled_offset(8, 0), 2 * 512);
+    EXPECT_EQ(ref_k_tiled_offset(8, 64), 3 * 512);
+    EXPECT_EQ(ref_k_tiled_offset(15, 127), 3 * 512 + 7 * 64 + 63);
+}
+
+TEST(LayoutTest, KTilePageRowBankPattern64WideIsUnique) {
+    int expected[] = {0, 4, 8, 12, 16, 20, 24, 28};
+    for (int lane = 0; lane < 8; ++lane) {
+        int row_start_half_offset = lane * 8;
+        EXPECT_EQ(bank_for_half_offset(row_start_half_offset), expected[lane]);
+    }
+}
+
+TEST(LayoutTest, KTileRowBankPattern128WideRepeats) {
+    int banks[16] = {};
+    for (int lane = 0; lane < 16; ++lane) {
+        int row_start_half_offset = lane * 8;
+        banks[lane] = bank_for_half_offset(row_start_half_offset);
+    }
+
+    for (int lane = 0; lane < 8; ++lane) {
+        EXPECT_EQ(banks[lane], banks[lane + 8]);
+    }
+}
+
+TEST(LayoutTest, MakeOrderedLayout_DefaultIsLeftMajor) {
+    auto ordered = make_ordered_layout(make_shape(Int<2>{}, Int<3>{}));
+
+    EXPECT_EQ(ordered(make_coordinate(Int<0>{}, Int<0>{})), 0);
+    EXPECT_EQ(ordered(make_coordinate(Int<1>{}, Int<0>{})), 1);
+    EXPECT_EQ(ordered(make_coordinate(Int<0>{}, Int<1>{})), 2);
+    EXPECT_EQ(ordered(make_coordinate(Int<1>{}, Int<2>{})), 5);
+}
+
+TEST(LayoutTest, BlockedProduct_2DPlainAtom) {
+    auto atom = make_layout(make_shape(Int<2>{}, Int<3>{}), make_stride(Int<3>{}, Int<1>{}));
+    auto tiler = make_ordered_layout(make_shape(Int<2>{}, Int<2>{}));
+    auto result = blocked_product(atom, tiler);
+
+    EXPECT_EQ(result.size(), 24);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<0>{}, Int<0>{}),
+                                     make_coordinate(Int<0>{}, Int<0>{}))), 0);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<0>{}, Int<1>{}),
+                                     make_coordinate(Int<0>{}, Int<0>{}))), 6);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<0>{}, Int<1>{}),
+                                     make_coordinate(Int<0>{}, Int<1>{}))), 18);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<1>{}, Int<1>{}),
+                                     make_coordinate(Int<2>{}, Int<1>{}))), 23);
+}
+
+TEST(LayoutTest, TileToShape_2DPlainAtom) {
+    auto atom = make_layout(make_shape(Int<2>{}, Int<3>{}), make_stride(Int<3>{}, Int<1>{}));
+    auto result = tile_to_shape(atom, make_shape(Int<4>{}, Int<6>{}));
+
+    EXPECT_EQ(result.size(), 24);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<0>{}, Int<0>{}),
+                                     make_coordinate(Int<0>{}, Int<0>{}))), 0);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<1>{}, Int<0>{}),
+                                     make_coordinate(Int<0>{}, Int<0>{}))), 3);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<0>{}, Int<1>{}),
+                                     make_coordinate(Int<0>{}, Int<0>{}))), 12);
+    EXPECT_EQ(result(make_coordinate(make_coordinate(Int<1>{}, Int<1>{}),
+                                     make_coordinate(Int<2>{}, Int<1>{}))), 23);
+}
+
+TEST(LayoutTest, TileToShape_8x64To64x128UsesRowMajorTileGrid) {
+    auto atom = make_layout(make_shape(Int<8>{}, Int<64>{}), make_stride(Int<64>{}, Int<1>{}));
+    auto result = tile_to_shape(atom, make_shape(Int<64>{}, Int<128>{}));
+
+    EXPECT_EQ(result.size(), 64 * 128);
+
+    auto coord00 = make_coordinate(make_coordinate(Int<0>{}, Int<0>{}),
+                                   make_coordinate(Int<0>{}, Int<0>{}));
+    auto coord10 = make_coordinate(make_coordinate(Int<0>{}, Int<1>{}),
+                                   make_coordinate(Int<0>{}, Int<0>{}));
+    auto coord01 = make_coordinate(make_coordinate(Int<0>{}, Int<0>{}),
+                                   make_coordinate(Int<0>{}, Int<1>{}));
+
+    EXPECT_EQ(result(coord00), 0);
+    EXPECT_EQ(result(coord10), 2 * 512);
+    EXPECT_EQ(result(coord01), 512);
+}
+
 TEST(LayoutTest, Operator_2D_SquareMatrix_RowVsCol) {
     // Test square matrix (special case where row/col major might coincide for some elements)
     auto shape = make_shape(Int<4>{}, Int<4>{});

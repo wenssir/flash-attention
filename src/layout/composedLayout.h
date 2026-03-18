@@ -35,7 +35,11 @@ struct ComposedLayout {
 
     template <typename Coord>
     HOST_DEVICE constexpr auto operator()(Coord const& c) const {
-        return _outer(_offset() + _inner(c));
+        if constexpr (has_underscore<Coord>::value) {
+            return slice(c, *this);
+        } else {
+            return _outer(container::tuple_add(_offset(), _inner(c)));
+        }
     }
 
     template <typename... Ints>
@@ -44,6 +48,7 @@ struct ComposedLayout {
     }
 
     HOST_DEVICE constexpr auto outer() const { return _outer; }
+    HOST_DEVICE constexpr auto inner() const { return _inner; }
 
     HOST_DEVICE constexpr auto size() const { return _inner.size(); }
     HOST_DEVICE constexpr auto shape() const { return _inner.shape(); }
@@ -54,7 +59,6 @@ struct ComposedLayout {
     HOST_DEVICE void print() const {
         printf("ComposedLayout:\n");
         printf("  Offset: ");
-        print_shape(_offset.shape());
         printf("  Inner: ");
         print_shape(_inner.shape());
         printf("  Inner stride: ");
@@ -62,6 +66,13 @@ struct ComposedLayout {
         printf("  Size: %zu\n", static_cast<size_t>(size()));
     }
 };
+
+template <typename Coord, typename OuterLayout, typename Offset, typename InnerLayout>
+HOST_DEVICE constexpr auto slice(Coord const& coord, ComposedLayout<OuterLayout, Offset, InnerLayout> const& layout) {
+    auto inner_slice = layout.inner()(coord);
+    auto new_offset = make_offset(container::tuple_add(layout.offset()(), inner_slice.offset()()));
+    return composition(layout.outer(), new_offset, inner_slice.inner());
+}
 
 
 template <typename Outer, typename Offset, typename Inner>
@@ -72,6 +83,19 @@ HOST_DEVICE constexpr auto composition(Outer const& o, Offset const& off, Inner 
 template <typename Outer, typename Inner>
 HOST_DEVICE constexpr auto composition(Outer const& o, Inner const& i) {
     return ComposedLayout<Outer, numeric::Int<0>, Inner>(o, numeric::Int<0>{}, i);
+}
+
+template <typename OuterLayout, typename Offset, typename InnerLayout, typename TrgShape>
+HOST_DEVICE constexpr auto tile_to_shape(ComposedLayout<OuterLayout, Offset, InnerLayout> const& layout,
+                                         TrgShape const& trg_shape) {
+    return composition(layout.outer(), layout.offset(), tile_to_shape(layout.inner(), trg_shape));
+}
+
+template <typename OuterLayout, typename Offset, typename InnerLayout, typename TrgShape, typename Order>
+HOST_DEVICE constexpr auto tile_to_shape(ComposedLayout<OuterLayout, Offset, InnerLayout> const& layout,
+                                         TrgShape const& trg_shape,
+                                         Order const& order) {
+    return composition(layout.outer(), layout.offset(), tile_to_shape(layout.inner(), trg_shape, order));
 }
 
 }

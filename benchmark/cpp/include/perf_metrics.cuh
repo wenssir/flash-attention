@@ -137,7 +137,7 @@ inline PerformanceMetrics calculate_flash_attention_metrics(
     metrics.peak_memory_bandwidth_gb_s = peak_specs.memory_bandwidth_gb_s;
     metrics.has_tensor_fp16_peak = peak_specs.has_tensor_fp16_peak;
 
-    metrics.theoretical_flops = 4.0 * B * H * N * N * d;
+    metrics.theoretical_flops = double(B) * H * (4.0 * N * N * d + 6.0 * N * N);
     metrics.gflops = metrics.theoretical_flops / (time_ms * 1e-3) / 1e9;
     if (metrics.has_tensor_fp16_peak && metrics.peak_tensor_fp16_tflops > 0.0) {
         metrics.compute_efficiency =

@@ -9,7 +9,7 @@
 #include <algorithm>
 
 #include "../../src/config/config.cuh"
-#include "../../src/forward/forward_v4_mma.cuh"
+#include "../../src/forward/forward_v5_mma.cuh"
 #include "../../src/utils/util_func.cuh"
 #include "include/test_configs.h"
 #include "include/perf_metrics.cuh"
@@ -118,13 +118,17 @@ BenchmarkResult run_benchmark(const TestConfig& cfg, const DevicePeakSpecs& peak
     dim3 block(Config::NThreads);
     size_t smem_size = forward::forward_smem_bytes<Config>();
     CUDA_CHECK(cudaFuncSetAttribute(
-        forward::flash_attention_forward_v4_mma<Config>,
+        forward::flash_attention_forward_v5_mma<Config>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(smem_size)));
+    CUDA_CHECK(cudaFuncSetAttribute(
+        forward::flash_attention_forward_v5_mma<Config>,
+        cudaFuncAttributePreferredSharedMemoryCarveout,
+        100));
 
     // Warmup
     for (int i = 0; i < warmup_iters; i++) {
-        forward::flash_attention_forward_v4_mma<Config><<<grid, block, smem_size>>>(args);
+        forward::flash_attention_forward_v5_mma<Config><<<grid, block, smem_size>>>(args);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -135,7 +139,7 @@ BenchmarkResult run_benchmark(const TestConfig& cfg, const DevicePeakSpecs& peak
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < benchmark_iters; i++) {
-        forward::flash_attention_forward_v4_mma<Config><<<grid, block, smem_size>>>(args);
+        forward::flash_attention_forward_v5_mma<Config><<<grid, block, smem_size>>>(args);
     }
     // Catch async launch/runtime errors before consuming timing results.
     CUDA_CHECK(cudaGetLastError());

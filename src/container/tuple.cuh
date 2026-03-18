@@ -31,20 +31,32 @@ template <typename... Ts>
 using Tuple = cxx::tuple<Ts...>;
 
 template <typename A, typename B>
+HOST_DEVICE constexpr auto dot_product(A a, B b);
+
+template <size_t I, typename A, typename B>
+HOST_DEVICE constexpr auto dot_product_tuple(A a, B b) {
+    if constexpr (I == cxx::tuple_size_v<A>) {
+        return numeric::Int<0>{};
+    } else {
+        return numeric::mixed_add(
+            dot_product(cxx::get<I>(a), cxx::get<I>(b)),
+            dot_product_tuple<I + 1>(a, b));
+    }
+}
+
+template <typename A, typename B>
 HOST_DEVICE constexpr auto dot_product(A a, B b) {
     if constexpr (!is_tuple_v<A>) {
         return numeric::mixed_mul(a, b);
     } else {
         static_assert(is_tuple_v<A> && is_tuple_v<B>, "dot_product only accepts tuples");
         static_assert(cxx::tuple_size_v<A> == cxx::tuple_size_v<B>, "dot_product only accepts tuples of the same size");
-        return [&]<size_t... Is>(cxx::index_sequence<Is...>) {
-            return (numeric::Int<0>{} + ... + dot_product(cxx::get<Is>(a), cxx::get<Is>(b)));
-        }(cxx::make_index_sequence<cxx::tuple_size_v<A>>{});
+        return dot_product_tuple<0>(a, b);
     }
 }
 
 template <typename A, typename B>
-DEVICE constexpr auto tuple_add(A a, B b) {
+HOST_DEVICE constexpr auto tuple_add(A a, B b) {
     if constexpr (!is_tuple_v<A> && !is_tuple_v<B>) {
         return a + b;
     } else if constexpr (!is_tuple_v<A>) {
@@ -64,13 +76,15 @@ DEVICE constexpr auto tuple_add(A a, B b) {
 template <typename A, typename B>
 HOST_DEVICE constexpr auto tuple_scale(A a, B b) {
     if constexpr (!is_tuple_v<A> && !is_tuple_v<B>) {
-        return a * b;
+        return numeric::mixed_mul(a, b);
     } else if constexpr (!is_tuple_v<A>) {
-        static_assert(cxx::tuple_size_v<B> == 1, "Scalar-tuple scale requires tuple size 1");
-        return cxx::make_tuple(a * cxx::get<0>(b));
+        return [&]<size_t... Is>(cxx::index_sequence<Is...>) {
+            return cxx::make_tuple(tuple_scale(a, cxx::get<Is>(b))...);
+        }(cxx::make_index_sequence<cxx::tuple_size_v<B>>{});
     } else if constexpr (!is_tuple_v<B>) {
-        static_assert(cxx::tuple_size_v<A> == 1, "Tuple-scalar scale requires tuple size 1");
-        return cxx::make_tuple(cxx::get<0>(a) * b);
+        return [&]<size_t... Is>(cxx::index_sequence<Is...>) {
+            return cxx::make_tuple(tuple_scale(cxx::get<Is>(a), b)...);
+        }(cxx::make_index_sequence<cxx::tuple_size_v<A>>{});
     } else {
         static_assert(cxx::tuple_size_v<A> == cxx::tuple_size_v<B>, "Tuple scale requires same size");
         return [&]<size_t... Is>(cxx::index_sequence<Is...>) {

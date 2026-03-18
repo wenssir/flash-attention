@@ -141,9 +141,12 @@ inline PerformanceMetrics calculate_flash_attention_metrics(
     metrics.time_ms = time_ms;
 
     // 1. 计算 FLOPs
-    // 标准公式：4*B*H*N²*d
-    // 分解：Q*K^T (2乘2加) + softmax (2) + Attn*V (2乘2加) ≈ 4
-    metrics.theoretical_flops = 4.0 * B * H * N * N * d;
+    // 与 Python benchmark / from-scratch 对齐：
+    // B * H * (4 * N^2 * d + 6 * N^2)
+    // 其中：
+    // - 4 * N^2 * d: QK^T + PV
+    // - 6 * N^2: softmax 标量开销近似
+    metrics.theoretical_flops = double(B) * H * (4.0 * N * N * d + 6.0 * N * N);
     metrics.gflops = metrics.theoretical_flops / (time_ms * 1e-3) / 1e9;
 
     // 2. 计算效率

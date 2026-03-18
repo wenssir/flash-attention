@@ -4,108 +4,74 @@
 #include "../layout/coordinate.h"
 #include "../numeric/Int.cuh"
 #include "../ptx/ptx.cuh"
+#include "../tensor_core/ldmatrix_traits.cuh"
+#include "../tensor_core/tensor.cuh"
+#include "../tensor_core/swizzle.cuh"
 #include "./thread_map.cuh"
 
 namespace loadstore {
 
-template <typename LdmatrixT, int ROWS, int COLS, bool Trans = false>
-struct LdmatrixHelper {
-    using Ldmatrix = LdmatrixT;
+template <typename KernelConfig>
+DEVICE int smem_offset(int row, int col) {
+    int inner_row = row % KernelConfig::SmemAtomRows;
+    int tile_row = row / KernelConfig::SmemAtomRows;
+    int inner_col = col % KernelConfig::SmemAtomCols;
+    int tile_col = col / KernelConfig::SmemAtomCols;
 
-    static_assert(ROWS == 16 || ROWS == 8, "ROWS must be 16 or 8");
-    static_assert(COLS == 16 || COLS == 8, "COLS must be 16 or 8");
+    constexpr int kAtomElems = KernelConfig::SmemAtomRows * KernelConfig::SmemAtomCols;
+    constexpr int kTileRowStride = KernelConfig::HeadDim * KernelConfig::SmemAtomRows;
 
-    DEVICE static auto coord(int lane_id) {
-        if constexpr (!Trans) {
-            return coord_non_trans(lane_id);
-        } else {
-            return coord_trans(lane_id);
-        }
+    int atom_offset = inner_row * KernelConfig::SmemAtomCols + inner_col;
+    if constexpr (KernelConfig::UseSmemSwizzle) {
+        atom_offset = tensor::Swizzle<3, 3, 3>{}(atom_offset);
     }
 
-private:
-    DEVICE static auto coord_non_trans(int lane_id) {
-        using namespace layout;
-        if constexpr (ROWS == 16 && COLS == 16) {
-            if (lane_id < 16) {
-                return make_coordinate(lane_id, 0);
-            }
-            return make_coordinate(lane_id - 16, 8);
-        } else if constexpr (ROWS == 16 && COLS == 8) {
-            return make_coordinate(lane_id % 16, 0);
-        } else {
-            return make_coordinate(lane_id % 8, 0);
-        }
+    return tile_row * kTileRowStride + tile_col * kAtomElems + atom_offset;
+}
+
+template <typename KernelConfig, typename TensorS>
+struct FragmentTensorView {
+    TensorS& tensor;
+    int base_row;
+    int base_col;
+
+    DEVICE auto data_ptr() const {
+        return tensor.data_ptr();
     }
 
-    DEVICE static auto coord_trans(int lane_id) {
-        using namespace layout;
-        if constexpr (ROWS == 16 && COLS == 16) {
-            return make_coordinate(lane_id % 16, 0);
-        } else if constexpr (ROWS == 16 && COLS == 8) {
-            return make_coordinate(lane_id % 16, 0);
-        } else {
-            return make_coordinate(lane_id % 8, 0);
-        }
+    DEVICE int offset(int row, int col) const {
+        return smem_offset<KernelConfig>(base_row + row, base_col + col);
     }
 };
 
-template <typename T>
-using LdmatrixHelperQ = LdmatrixHelper<ptx::LDMATRIX_X4<T>, 16, 16>;
+template <typename KernelConfig, typename TensorS>
+DEVICE auto partition_fragment_A(TensorS& s_tensor, int warp, int k_tile) {
+    return FragmentTensorView<KernelConfig, TensorS>{
+        s_tensor,
+        warp * KernelConfig::MmaM,
+        k_tile * KernelConfig::MmaK};
+}
 
-template <typename T>
-using LdmatrixHelperK = LdmatrixHelper<ptx::LDMATRIX_X2_TRANS<T>, 16, 8>;
+template <typename KernelConfig, typename TensorS>
+DEVICE auto partition_fragment_B(TensorS& s_tensor, int out_tile, int k_tile) {
+    return FragmentTensorView<KernelConfig, TensorS>{
+        s_tensor,
+        out_tile * KernelConfig::MmaN,
+        k_tile * KernelConfig::MmaK};
+}
 
-template <typename Map, typename Frag, typename TensorS>
-DEVICE void copy_s2r(Frag& frag, TensorS& s_tensor) {
-    int lane_id = Map::lane_id(threadIdx.x);
+template <typename KernelConfig, typename TensorS>
+DEVICE auto partition_fragment_V(TensorS& s_tensor, int k_tile, int out_tile) {
+    return FragmentTensorView<KernelConfig, TensorS>{
+        s_tensor,
+        k_tile * KernelConfig::MmaK,
+        out_tile * KernelConfig::MmaN};
+}
+
+template <typename KernelConfig, typename Frag, typename TensorS>
+DEVICE void load_fragment(Frag& frag, TensorS& s_tensor) {
+    int lane_id = threadIdx.x & 31;
     frag.load(s_tensor, lane_id);
 }
-
-template <typename KernelConfig, typename Frag, typename TensorS>
-DEVICE void load_fragment_a(Frag& frag, TensorS& s_tensor) {
-    using Map = S2RQThreadMap<KernelConfig>;
-    copy_s2r<Map>(frag, s_tensor);
-}
-
-template <typename KernelConfig, typename Frag, typename TensorS>
-DEVICE void load_fragment_b(Frag& frag, TensorS& s_tensor) {
-    using Map = S2RKVThreadMap<KernelConfig>;
-    copy_s2r<Map>(frag, s_tensor);
-}
-
-template <typename KernelConfig, typename Frag, typename TensorS>
-DEVICE void copy_s2r_q(Frag& frag, TensorS& s_tensor) {
-    load_fragment_a<KernelConfig>(frag, s_tensor);
-}
-
-template <typename KernelConfig, typename Frag, typename TensorS>
-DEVICE void copy_s2r_kv(Frag& frag, TensorS& s_tensor) {
-    load_fragment_b<KernelConfig>(frag, s_tensor);
-}
-
-struct CopyS2ROp {
-    template <typename KernelConfig, typename Frag, typename TensorS>
-    DEVICE void operator()(Frag& frag, TensorS& s_tensor) const {
-        load_fragment_a<KernelConfig>(frag, s_tensor);
-    }
-
-    template <typename Frag, typename TensorS>
-    DEVICE void operator()(Frag& frag, TensorS& s_tensor) const {
-        copy_s2r<LdmatrixThreadMap<void>>(frag, s_tensor);
-    }
-};
-
-struct CopyS2RKVOp {
-    template <typename KernelConfig, typename Frag, typename TensorS>
-    DEVICE void operator()(Frag& frag, TensorS& s_tensor) const {
-        load_fragment_b<KernelConfig>(frag, s_tensor);
-    }
-
-    template <typename Frag, typename TensorS>
-    DEVICE void operator()(Frag& frag, TensorS& s_tensor) const {
-        copy_s2r<LdmatrixThreadMap<void>>(frag, s_tensor);
-    }
-};
 
 } // namespace loadstore

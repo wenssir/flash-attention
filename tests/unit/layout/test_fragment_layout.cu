@@ -19,13 +19,38 @@ using namespace tensor;
 
 TEST(FragmentLayoutTest, Fragment16x16_Constants) {
     // 验证编译时常量
-    using Frag16x16 = Fragment<__half, loadstore::LdmatrixHelperQ<__half>, 16, 16>;
+    using Frag16x16 = Fragment<__half, tensor::LdmatrixHelperQ<__half>, 16, 16>;
     EXPECT_EQ(Frag16x16::REGS_PER_LANE, 4);
 }
 
 TEST(FragmentLayoutTest, Fragment16x8_Constants) {
-    using Frag16x8 = Fragment<__half, loadstore::LdmatrixHelperK<__half>, 16, 8>;
+    using Frag16x8 = Fragment<__half, tensor::LdmatrixHelperK<__half>, 16, 8>;
     EXPECT_EQ(Frag16x8::REGS_PER_LANE, 2);
+}
+
+TEST(FragmentLayoutTest, KFragment8x16StartsStayWithinSingle8x64Page) {
+    using FragKLike = Fragment<
+        __half,
+        tensor::LdmatrixTraits8x16Trans<__half>,
+        8,
+        16>;
+
+    for (int lane = 0; lane < 32; ++lane) {
+        auto coord = tensor::LdmatrixTraits8x16Trans<__half>::coord(lane);
+        int row = static_cast<int>(cxx::get<0>(coord));
+        int col = static_cast<int>(cxx::get<1>(coord));
+
+        EXPECT_GE(row, 0);
+        EXPECT_LT(row, 8);
+        EXPECT_EQ(col, 0);
+
+        int page_row = row / 8;
+        int page_col = col / 64;
+        int page_id = page_row * 2 + page_col;
+        EXPECT_EQ(page_id, 0);
+    }
+
+    EXPECT_EQ(FragKLike::REGS_PER_LANE, 2);
 }
 
 // =============================================================================
@@ -42,7 +67,7 @@ __global__ void fragment_test_kernel(__half* smem, uint32_t* output) {
     auto smem_tensor = make_tensor(smem, smem_layout);
 
     // 创建 Fragment
-    Fragment<__half, loadstore::LdmatrixHelperQ<__half>, 16, 16> frag;
+    Fragment<__half, tensor::LdmatrixHelperQ<__half>, 16, 16> frag;
 
     // 加载
     frag.load(smem_tensor, lane_id);

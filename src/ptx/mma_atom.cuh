@@ -15,18 +15,13 @@ struct Sm80MmaF16F16F32M16N8K16 {
 
     template <typename FragA, typename FragB, typename FragC>
     DEVICE static void fma(FragA const& a, FragB const& b, FragC& c) {
-        float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
-
-        ptx::MMA_M16N8K16_F32<__half> mma;
-        mma(a(0), a(1), a(2), a(3),
-            b(0), b(1),
-            c(0), c(1), c(2), c(3),
-            d0, d1, d2, d3);
-
-        c(0) = d0;
-        c(1) = d1;
-        c(2) = d2;
-        c(3) = d3;
+        asm volatile(
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+            : "+f"(c(0)), "+f"(c(1)), "+f"(c(2)), "+f"(c(3))
+            : "r"(a(0)), "r"(a(1)), "r"(a(2)), "r"(a(3)),
+              "r"(b(0)), "r"(b(1))
+        );
     }
 };
 

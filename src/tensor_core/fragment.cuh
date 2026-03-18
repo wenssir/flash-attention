@@ -36,8 +36,9 @@ struct Fragment{
     template <typename Tensor>
     DEVICE void load(Tensor& tensor, int lane_id) {
         auto coord = Helper::coord(lane_id);
-
-        T* ptr = &tensor(coord);
+        T* ptr = tensor.data_ptr() +
+                 tensor.offset(static_cast<int>(cxx::get<0>(coord)),
+                               static_cast<int>(cxx::get<1>(coord)));
 
         using Ldmatrix = typename Helper::Ldmatrix;
         if constexpr (REGS_PER_LANE == 4) {
@@ -124,37 +125,5 @@ struct is_fragment<AccumFragment<T, N>> : cxx::true_type {};
 
 template <typename T>
 constexpr bool is_fragment_v = is_fragment<cxx::remove_cv_t<cxx::remove_reference_t<T>>>::value;
-
-template <typename Frag>
-struct FragmentView {
-    Frag& frag;
-
-    DEVICE constexpr explicit FragmentView(Frag& frag_) : frag(frag_) {}
-
-    DEVICE auto& operator()(int i) {
-        return frag(i);
-    }
-
-    DEVICE auto const& operator()(int i) const {
-        return frag(i);
-    }
-
-    DEVICE constexpr int size() const {
-        return frag.size();
-    }
-};
-
-template <typename Frag>
-DEVICE constexpr auto make_fragment_view(Frag& frag) {
-    return FragmentView<Frag>{frag};
-}
-
-template<typename T, typename Helper, int ROWS, int COLS, typename Tensor>
-__device__ void load_warp_block(Tensor& tensor) {
-    int lane_id = threadIdx.x % 32;
-    Fragment<T, Helper, ROWS, COLS> frag;
-
-    frag.load(tensor, lane_id);
-}
 
 }
